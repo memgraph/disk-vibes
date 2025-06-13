@@ -1,0 +1,17 @@
+digraph G {
+    rankdir=LR;
+    node [shape=box, style=filled, fillcolor=orange];
+    edge [color=gray50];
+
+    transaction [label="Graph Transaction"];
+    storage [label="Graph"];
+    commit_log [label="Commit Log"];
+    isolation [label="Isolation Level"];
+    tx_id [label="Transaction ID"];
+
+    transaction -> storage;
+    transaction -> tx_id;
+    storage -> tx_id;
+    transaction -> commit_log;
+    transaction -> isolation;
+}
