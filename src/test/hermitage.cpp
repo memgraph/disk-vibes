@@ -116,3 +116,41 @@ TEST_F(HermitageTest, G0) {
   ASSERT_TRUE(tx12->Commit().ok());
   ASSERT_TRUE(tx2->Commit().ok());
 }
+
+// G1a: Dirty Reads
+// One transaction reads a value that was written by another uncommitted transaction
+TEST_F(HermitageTest, G1a) {
+  // Start first transaction
+  auto tx1_result = tx_graph_->BeginTransaction(memgraph::IsolationLevel::READ_UNCOMMITTED);
+  ASSERT_TRUE(tx1_result.ok());
+  auto tx1 = std::move(tx1_result).ValueOrDie();
+
+  // Start second transaction
+  auto tx2_result = tx_graph_->BeginTransaction(memgraph::IsolationLevel::READ_UNCOMMITTED);
+  ASSERT_TRUE(tx2_result.ok());
+  auto tx2 = std::move(tx2_result).ValueOrDie();
+
+  // First transaction updates key 1
+  std::vector<memgraph::Node> nodes1 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 101}")};
+  ASSERT_TRUE(tx1->AddNodes(nodes1).ok());
+
+  // Second transaction reads key 1 (should see initial value)
+  auto result2 = tx2->GetNodes(1, 2);
+  ASSERT_TRUE(result2.ok());
+  auto nodes = result2.ValueOrDie();
+  ASSERT_EQ(nodes.size(), 1);
+  ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+
+  // First transaction aborts
+  ASSERT_TRUE(tx1->Abort().ok());
+
+  // Second transaction reads key 1 again (should still see original value 11)
+  result2 = tx2->GetNodes(1, 2);
+  ASSERT_TRUE(result2.ok());
+  nodes = result2.ValueOrDie();
+  ASSERT_EQ(nodes.size(), 1);
+  ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+
+  // Second transaction commits
+  ASSERT_TRUE(tx2->Commit().ok());
+}

@@ -270,7 +270,7 @@ public:
         if (state_ == transaction::TransactionState::ACTIVE) {
           auto status = Abort();
           if (!status.ok()) {
-            spdlog::error("Failed to abort transaction {} in destructor: {}", transaction_id_, status.ToString());
+            spdlog::warn("Failed to abort transaction {} in destructor: {}", transaction_id_, status.ToString());
           }
         }
       }
@@ -286,13 +286,13 @@ public:
       // Try to lock the pages
       auto status = log_.LockPages(transaction_id_, page_ids, true);
       if (!status.ok()) {
-        spdlog::error("Failed to lock pages for transaction {}: {}", transaction_id_, status.ToString());
+        spdlog::trace("Failed to lock pages for transaction {}: {}", transaction_id_, status.ToString());
         return status;
       }
       // Add nodes to the graph
       status = graph_.AddNodes(nodes, transaction_id_);
       if (!status.ok()) {
-        spdlog::error("Failed to add nodes for transaction {}: {}", transaction_id_, status.ToString());
+        spdlog::trace("Failed to add nodes for transaction {}: {}", transaction_id_, status.ToString());
         log_.UnlockPages(transaction_id_);
         return status;
       }
@@ -308,7 +308,7 @@ public:
       };
       status = log_.Append(transaction_id_, entry);
       if (!status.ok()) {
-        spdlog::error("Failed to append to log for transaction {}: {}", transaction_id_, status.ToString());
+        spdlog::trace("Failed to append to log for transaction {}: {}", transaction_id_, status.ToString());
         log_.UnlockPages(transaction_id_);
         return status;
       }
@@ -327,7 +327,7 @@ public:
       // Try to lock the pages
       auto status = log_.LockPages(transaction_id_, page_ids, false);
       if (!status.ok()) {
-        spdlog::error("Failed to lock pages for transaction {}: {}", transaction_id_, status.ToString());
+        spdlog::trace("Failed to lock pages for transaction {}: {}", transaction_id_, status.ToString());
         return status;
       }
 
@@ -339,7 +339,7 @@ public:
       }
 
       if (!status.ok()) {
-        spdlog::error("Failed to add edges for transaction {}: {}", transaction_id_, status.ToString());
+        spdlog::trace("Failed to add edges for transaction {}: {}", transaction_id_, status.ToString());
         log_.UnlockPages(transaction_id_);
         return status;
       }
@@ -352,7 +352,7 @@ public:
       };
       status = log_.Append(transaction_id_, entry);
       if (!status.ok()) {
-        spdlog::error("Failed to append to log for transaction {}: {}", transaction_id_, status.ToString());
+        spdlog::trace("Failed to append to log for transaction {}: {}", transaction_id_, status.ToString());
         log_.UnlockPages(transaction_id_);
         return status;
       }
