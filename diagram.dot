@@ -3,15 +3,48 @@ digraph G {
     node [shape=box, style=filled, fillcolor=orange];
     edge [color=gray50];
 
-    transaction [label="Graph Transaction"];
-    storage [label="Graph"];
-    commit_log [label="Commit Log"];
-    isolation [label="Isolation Level"];
-    tx_id [label="Transaction ID"];
+    subgraph cluster_graph {
+        label="Graph";
+        style=filled;
+        color=lightgrey;
 
-    transaction -> storage;
-    transaction -> tx_id;
-    storage -> tx_id;
-    transaction -> commit_log;
-    transaction -> isolation;
+        graph_storage [label=<Graph<br/><font point-size="10">(partitioning, serialization)</font>>];
+        page_storage [label="Page Storage", fillcolor=lightblue];
+        mutex_manager [label="Mutex Manager", fillcolor=lightblue];
+        file_persistence [label="File Persistence\n(Arrow/Parquet)", fillcolor=lightblue];
+
+        graph_storage -> page_storage;
+        graph_storage -> mutex_manager;
+        graph_storage -> file_persistence;
+        page_storage -> mutex_manager;
+        page_storage -> file_persistence;
+    }
+
+    subgraph cluster_tx {
+        label="Transactions";
+        style=filled;
+        color=lightgrey;
+
+        transaction [label="Transactional Graph"];
+        commit_log [label="Commit Log"];
+        isolation [label="Isolation Level"];
+        tx_id [label="Transaction ID"];
+
+        // TODO(gitbuda): The following are concepts not objects -> mark them distinctively.
+        page_locks [label="Page Locks", fillcolor=lightgreen];
+        tx_state [label="Transaction State", fillcolor=lightgreen];
+        dirty_pages [label="Dirty Pages", fillcolor=lightgreen];
+
+        transaction -> commit_log;
+        transaction -> isolation;
+        transaction -> tx_id;
+        transaction -> page_locks;
+        transaction -> tx_state;
+        transaction -> dirty_pages;
+    }
+
+    // Cross-cluster relationships
+    transaction -> graph_storage;
+    page_locks -> mutex_manager;
+    dirty_pages -> page_storage;
 }
