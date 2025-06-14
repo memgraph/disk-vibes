@@ -20,9 +20,23 @@
 using namespace memgraph;
 using Node = memgraph::Node;
 
+std::string IsolationLevelToString(memgraph::IsolationLevel level) {
+  switch (level) {
+  case memgraph::IsolationLevel::NO_ISOLATION:
+    return "NO_ISOLATION";
+  case memgraph::IsolationLevel::READ_UNCOMMITTED:
+    return "READ_UNCOMMITTED";
+  case memgraph::IsolationLevel::READ_COMMITTED:
+    return "READ_COMMITTED";
+  default:
+    return "UNKNOWN";
+  }
+}
+
 struct BenchmarkResult {
   int64_t batch_size;
   int num_threads;
+  memgraph::IsolationLevel isolation_level;
   double import_time;
   double nodes_per_second;
   double edges_per_second;
@@ -61,10 +75,10 @@ void print_progress(const std::string &prefix, int64_t current, int64_t total) {
 }
 
 BenchmarkResult run_benchmark(Graph &graph, int64_t batch_size, int num_threads, int64_t total_nodes,
-                              int64_t total_edges, bool use_isolation = false) {
+                              int64_t total_edges, memgraph::IsolationLevel isolation_level) {
   // Create TransactionalGraph if isolation is enabled
   std::unique_ptr<TransactionalGraph> tx_graph;
-  if (use_isolation) {
+  if (isolation_level != memgraph::IsolationLevel::NO_ISOLATION) {
     tx_graph = std::make_unique<TransactionalGraph>(graph);
   }
 
@@ -117,8 +131,8 @@ BenchmarkResult run_benchmark(Graph &graph, int64_t batch_size, int num_threads,
 
         auto start_time = std::chrono::high_resolution_clock::now();
         ::arrow::Status status;
-        if (use_isolation) {
-          auto tx_result = tx_graph->BeginTransaction(IsolationLevel::READ_UNCOMMITTED);
+        if (isolation_level != memgraph::IsolationLevel::NO_ISOLATION) {
+          auto tx_result = tx_graph->BeginTransaction(isolation_level);
           if (!tx_result.ok()) {
             spdlog::error("Error beginning transaction: {}", tx_result.status().ToString());
             return;
@@ -192,8 +206,8 @@ BenchmarkResult run_benchmark(Graph &graph, int64_t batch_size, int num_threads,
 
         auto start_time = std::chrono::high_resolution_clock::now();
         ::arrow::Status status;
-        if (use_isolation) {
-          auto tx_result = tx_graph->BeginTransaction(IsolationLevel::READ_UNCOMMITTED);
+        if (isolation_level != memgraph::IsolationLevel::NO_ISOLATION) {
+          auto tx_result = tx_graph->BeginTransaction(isolation_level);
           if (!tx_result.ok()) {
             spdlog::error("Error beginning transaction: {}", tx_result.status().ToString());
             return;
@@ -271,6 +285,7 @@ BenchmarkResult run_benchmark(Graph &graph, int64_t batch_size, int num_threads,
 
   return BenchmarkResult{batch_size,
                          num_threads,
+                         isolation_level,
                          total_duration.count(),
                          total_nodes / node_duration.count(),
                          total_edges / edge_duration.count(),
@@ -282,14 +297,15 @@ BenchmarkResult run_benchmark(Graph &graph, int64_t batch_size, int num_threads,
 
 int main(int argc, char *argv[]) {
   const bool KEEP_TEST_DATA = false; // Set to true to keep test data, false to clean up
-  // TODO(gitbuda): Isolation levels should be hardcoded under the benchmark and always run.
-  const bool USE_ISOLATION = true; // Set to true to use READ_UNCOMMITTED isolation
 
   // Default values
   int64_t TOTAL_NODES = 1'000'000;
   int64_t TOTAL_EDGES = 1'000'000;
   std::vector<int64_t> batch_sizes = {100, 1'000, 10'000, 100'000};
   std::vector<int> thread_counts;
+  std::vector<memgraph::IsolationLevel> isolation_levels = {memgraph::IsolationLevel::NO_ISOLATION,
+                                                            memgraph::IsolationLevel::READ_UNCOMMITTED,
+                                                            memgraph::IsolationLevel::READ_COMMITTED};
 
   // Parse command line arguments
   if (argc > 1) {
@@ -341,94 +357,96 @@ int main(int argc, char *argv[]) {
   std::vector<PageType> page_types = {PageType::ARROW, PageType::PARQUET};
   for (const auto &page_type : page_types) {
     std::string format_name = (page_type == PageType::ARROW) ? "arrow" : "parquet";
-    std::string isolation_name = USE_ISOLATION ? "read_uncommitted" : "no_isolation";
-    std::cout << "\n=== Running benchmarks for " << format_name << " format with " << isolation_name
-              << " ===" << std::endl;
-    std::cout << "\nBenchmark Configuration:" << std::endl;
-    std::cout << "Format: " << format_name << std::endl;
-    std::cout << "Isolation Level: " << isolation_name << std::endl;
-    std::cout << "Keep Test Data: " << (KEEP_TEST_DATA ? "Yes" : "No") << std::endl;
-    std::cout << "Total Nodes: " << TOTAL_NODES << std::endl;
-    std::cout << "Total Edges: " << TOTAL_EDGES << std::endl;
-    std::cout << "Batch Sizes: ";
-    for (size_t i = 0; i < batch_sizes.size(); ++i) {
-      std::cout << batch_sizes[i];
-      if (i < batch_sizes.size() - 1)
-        std::cout << ", ";
-    }
-    std::cout << std::endl;
-    std::cout << "Thread Counts: ";
-    for (size_t i = 0; i < thread_counts.size(); ++i) {
-      std::cout << thread_counts[i];
-      if (i < thread_counts.size() - 1)
-        std::cout << ", ";
-    }
-    std::cout << std::endl << std::endl;
+    std::cout << "\n=== Running benchmarks for " << format_name << " format ===" << std::endl;
 
-    std::vector<BenchmarkResult> results;
+    for (const auto &isolation_level : isolation_levels) {
+      std::string isolation_name = IsolationLevelToString(isolation_level);
+      std::cout << "\nBenchmark Configuration:" << std::endl;
+      std::cout << "Format: " << format_name << std::endl;
+      std::cout << "Isolation Level: " << isolation_name << std::endl;
+      std::cout << "Keep Test Data: " << (KEEP_TEST_DATA ? "Yes" : "No") << std::endl;
+      std::cout << "Total Nodes: " << TOTAL_NODES << std::endl;
+      std::cout << "Total Edges: " << TOTAL_EDGES << std::endl;
+      std::cout << "Batch Sizes: ";
+      for (size_t i = 0; i < batch_sizes.size(); ++i) {
+        std::cout << batch_sizes[i];
+        if (i < batch_sizes.size() - 1)
+          std::cout << ", ";
+      }
+      std::cout << std::endl;
+      std::cout << "Thread Counts: ";
+      for (size_t i = 0; i < thread_counts.size(); ++i) {
+        std::cout << thread_counts[i];
+        if (i < thread_counts.size() - 1)
+          std::cout << ", ";
+      }
+      std::cout << std::endl << std::endl;
 
-    // Run benchmarks for each thread count and batch size combination
-    for (int num_threads : thread_counts) {
-      std::cout << "\nTesting with " << num_threads << " threads:" << std::endl;
-      for (int64_t batch_size : batch_sizes) {
-        std::cout << "\nBenchmarking batch size: " << batch_size << std::endl;
-        // Create test directory with format, thread count, and batch size in the path
-        std::filesystem::path test_dir =
-            main_benchmark_dir / (format_name + "_" + isolation_name + "_t" + std::to_string(num_threads) + "_b" +
-                                  std::to_string(batch_size));
-        if (!KEEP_TEST_DATA) {
-          std::filesystem::remove_all(test_dir);
-        }
-        std::filesystem::create_directories(test_dir);
+      std::vector<BenchmarkResult> results;
 
-        Graph graph(test_dir, page_type, batch_size);
-        auto result = run_benchmark(graph, batch_size, num_threads, TOTAL_NODES, TOTAL_EDGES, USE_ISOLATION);
-        if (result.import_time < 0) {
-          spdlog::error("Benchmark failed for batch size {} with {} threads", batch_size, num_threads);
-          continue;
-        }
-        results.push_back(result);
+      // Run benchmarks for each thread count and batch size combination
+      for (int num_threads : thread_counts) {
+        std::cout << "\nTesting with " << num_threads << " threads:" << std::endl;
+        for (int64_t batch_size : batch_sizes) {
+          std::cout << "\nBenchmarking batch size: " << batch_size << std::endl;
+          // Create test directory with format, isolation level, thread count, and batch size in the path
+          std::filesystem::path test_dir =
+              main_benchmark_dir / (format_name + "_" + isolation_name + "_t" + std::to_string(num_threads) + "_b" +
+                                    std::to_string(batch_size));
+          if (!KEEP_TEST_DATA) {
+            std::filesystem::remove_all(test_dir);
+          }
+          std::filesystem::create_directories(test_dir);
 
-        if (KEEP_TEST_DATA) {
-          std::cout << "Benchmark data kept in: " << test_dir << std::endl;
+          Graph graph(test_dir, page_type, batch_size);
+          auto result = run_benchmark(graph, batch_size, num_threads, TOTAL_NODES, TOTAL_EDGES, isolation_level);
+          if (result.import_time < 0) {
+            spdlog::error("Benchmark failed for batch size {} with {} threads", batch_size, num_threads);
+            continue;
+          }
+          results.push_back(result);
+
+          if (KEEP_TEST_DATA) {
+            std::cout << "Benchmark data kept in: " << test_dir << std::endl;
+          }
         }
       }
+
+      // Save results to CSV
+      std::filesystem::path results_path("benchmark_" + isolation_name + "_results_" + format_name + ".csv");
+      std::ofstream csv(results_path);
+      csv << "batch_size,num_threads,isolation_level,import_time,nodes_per_second,edges_per_second,avg_node_latency_ms,"
+             "p99_node_latency_ms,avg_edge_latency_ms,p99_edge_latency_ms\n";
+
+      // Find the configuration with the best balanced score
+      auto best_result =
+          std::max_element(results.begin(), results.end(), [](const BenchmarkResult &a, const BenchmarkResult &b) {
+            return a.calculate_score() < b.calculate_score();
+          });
+
+      // Write results to CSV
+      for (const auto &result : results) {
+        csv << result.batch_size << "," << result.num_threads << "," << IsolationLevelToString(result.isolation_level)
+            << "," << result.import_time << "," << result.nodes_per_second << "," << result.edges_per_second << ","
+            << result.avg_node_latency_ms << "," << result.p99_node_latency_ms << "," << result.avg_edge_latency_ms
+            << "," << result.p99_edge_latency_ms << "\n";
+      }
+
+      // Print recommendation
+      std::cout << "\nRecommended configuration for " << format_name << " with " << isolation_name
+                << " (best balanced performance):" << std::endl;
+      std::cout << "Batch size: " << best_result->batch_size << std::endl;
+      std::cout << "Number of threads: " << best_result->num_threads << std::endl;
+      std::cout << "Import time: " << best_result->import_time << " seconds" << std::endl;
+      std::cout << "Node throughput: " << best_result->nodes_per_second << " nodes/second" << std::endl;
+      std::cout << "Edge throughput: " << best_result->edges_per_second << " edges/second" << std::endl;
+      std::cout << "Average Node Latency: " << best_result->avg_node_latency_ms << " ms" << std::endl;
+      std::cout << "99th Percentile Node Latency: " << best_result->p99_node_latency_ms << " ms" << std::endl;
+      std::cout << "Average Edge Latency: " << best_result->avg_edge_latency_ms << " ms" << std::endl;
+      std::cout << "99th Percentile Edge Latency: " << best_result->p99_edge_latency_ms << " ms" << std::endl;
+      std::cout << "Performance Score: " << best_result->calculate_score() << std::endl;
+      std::cout << "\nResults saved to " << results_path << std::endl;
     }
-
-    // Save results to CSV
-    std::filesystem::path results_path("benchmark_" + isolation_name + "_results_" + format_name + ".csv");
-    std::ofstream csv(results_path);
-    csv << "batch_size,num_threads,import_time,nodes_per_second,edges_per_second,avg_node_latency_ms,p99_node_latency_"
-           "ms,avg_edge_latency_ms,p99_edge_latency_ms\n";
-
-    // Find the configuration with the best balanced score
-    auto best_result =
-        std::max_element(results.begin(), results.end(), [](const BenchmarkResult &a, const BenchmarkResult &b) {
-          return a.calculate_score() < b.calculate_score();
-        });
-
-    // Write results to CSV
-    for (const auto &result : results) {
-      csv << result.batch_size << "," << result.num_threads << "," << result.import_time << ","
-          << result.nodes_per_second << "," << result.edges_per_second << "," << result.avg_node_latency_ms << ","
-          << result.p99_node_latency_ms << "," << result.avg_edge_latency_ms << "," << result.p99_edge_latency_ms
-          << "\n";
-    }
-
-    // Print recommendation
-    std::cout << "\nRecommended configuration for " << format_name << " with " << isolation_name
-              << " (best balanced performance):" << std::endl;
-    std::cout << "Batch size: " << best_result->batch_size << std::endl;
-    std::cout << "Number of threads: " << best_result->num_threads << std::endl;
-    std::cout << "Import time: " << best_result->import_time << " seconds" << std::endl;
-    std::cout << "Node throughput: " << best_result->nodes_per_second << " nodes/second" << std::endl;
-    std::cout << "Edge throughput: " << best_result->edges_per_second << " edges/second" << std::endl;
-    std::cout << "Average Node Latency: " << best_result->avg_node_latency_ms << " ms" << std::endl;
-    std::cout << "99th Percentile Node Latency: " << best_result->p99_node_latency_ms << " ms" << std::endl;
-    std::cout << "Average Edge Latency: " << best_result->avg_edge_latency_ms << " ms" << std::endl;
-    std::cout << "99th Percentile Edge Latency: " << best_result->p99_edge_latency_ms << " ms" << std::endl;
-    std::cout << "Performance Score: " << best_result->calculate_score() << std::endl;
-    std::cout << "\nResults saved to " << results_path << std::endl;
   }
 
   if (KEEP_TEST_DATA) {
