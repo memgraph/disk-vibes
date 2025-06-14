@@ -42,29 +42,29 @@ TEST_F(GraphTransactionTest, BasicNodeOperations) {
   TransactionalGraph tx_graph(graph);
   auto tx_result = tx_graph.BeginTransaction(IsolationLevel::READ_UNCOMMITTED);
   ASSERT_TRUE(tx_result.ok());
-  auto tx = std::move(tx_result).ValueOrDie();
+  auto tx = std::move(tx_result.ValueOrDie());
 
   std::vector<Node> nodes = {Node(1, {"Node1"}, "{\"prop1\": \"value1\"}"),
                              Node(2, {"Node2"}, "{\"prop2\": \"value2\"}"),
                              Node(3, {"Node3"}, "{\"prop3\": \"value3\"}")};
-  ASSERT_TRUE(tx.AddNodes(nodes).ok());
+  ASSERT_TRUE(tx->AddNodes(nodes).ok());
 
-  auto result = tx.GetNodes(1, 4);
+  auto result = tx->GetNodes(1, 4);
   ASSERT_TRUE(result.ok());
   auto retrieved_nodes = result.ValueOrDie();
   ASSERT_EQ(retrieved_nodes.size(), 3);
 
   // Delete a node
-  ASSERT_TRUE(tx.DeleteNodes({2}).ok());
+  ASSERT_TRUE(tx->DeleteNodes({2}).ok());
 
   // Verify node was deleted
-  result = tx.GetNodes(1, 4);
+  result = tx->GetNodes(1, 4);
   ASSERT_TRUE(result.ok());
   retrieved_nodes = result.ValueOrDie();
   ASSERT_EQ(retrieved_nodes.size(), 2);
 
   // Commit the transaction
-  ASSERT_TRUE(tx.Commit().ok());
+  ASSERT_TRUE(tx->Commit().ok());
 }
 
 TEST_F(GraphTransactionTest, BasicEdgeOperations) {
@@ -74,32 +74,32 @@ TEST_F(GraphTransactionTest, BasicEdgeOperations) {
 
   auto tx_result = tx_graph.BeginTransaction(IsolationLevel::READ_UNCOMMITTED);
   ASSERT_TRUE(tx_result.ok());
-  auto tx = std::move(tx_result).ValueOrDie();
+  auto tx = std::move(tx_result.ValueOrDie());
 
   // Add some edges
   std::vector<memgraph::Edge> edges = {memgraph::Edge(1, 1, 2, "RELATES_TO", "{\"weight\": 1.0}"),
                                        memgraph::Edge(2, 2, 3, "FOLLOWS", "{\"since\": 2024}"),
                                        memgraph::Edge(3, 3, 1, "KNOWS", "{\"strength\": \"high\"}")};
 
-  ASSERT_TRUE(tx.AddEdges(edges).ok());
+  ASSERT_TRUE(tx->AddEdges(edges).ok());
 
   // Verify edges were added
-  auto result = tx.GetEdges(1, 4);
+  auto result = tx->GetEdges(1, 4);
   ASSERT_TRUE(result.ok());
   auto retrieved_edges = result.ValueOrDie();
   ASSERT_EQ(retrieved_edges.size(), 3);
 
   // Delete an edge
-  ASSERT_TRUE(tx.DeleteEdges({2}).ok());
+  ASSERT_TRUE(tx->DeleteEdges({2}).ok());
 
   // Verify edge was deleted
-  result = tx.GetEdges(1, 4);
+  result = tx->GetEdges(1, 4);
   ASSERT_TRUE(result.ok());
   retrieved_edges = result.ValueOrDie();
   ASSERT_EQ(retrieved_edges.size(), 2);
 
   // Commit the transaction
-  ASSERT_TRUE(tx.Commit().ok());
+  ASSERT_TRUE(tx->Commit().ok());
 }
 
 TEST_F(GraphTransactionTest, TransactionAbort) {
@@ -108,21 +108,21 @@ TEST_F(GraphTransactionTest, TransactionAbort) {
   TransactionalGraph tx_graph(graph);
   auto tx_result = tx_graph.BeginTransaction(IsolationLevel::READ_UNCOMMITTED);
   ASSERT_TRUE(tx_result.ok());
-  auto tx = std::move(tx_result).ValueOrDie();
+  auto tx = std::move(tx_result.ValueOrDie());
 
   // Add some initial data
   std::vector<Node> initial_nodes = {Node(1, {"InitialNode"}, "{\"prop\": \"value\"}")};
-  ASSERT_TRUE(tx.AddNodes(initial_nodes).ok());
+  ASSERT_TRUE(tx->AddNodes(initial_nodes).ok());
   // Verify the new node is visible within the transaction
-  auto result = tx.GetNodes(1, 3);
+  auto result = tx->GetNodes(1, 3);
   ASSERT_TRUE(result.ok());
   auto retrieved_nodes = result.ValueOrDie();
   ASSERT_EQ(retrieved_nodes.size(), 1);
 
   // Abort the transaction
-  ASSERT_TRUE(tx.Abort().ok());
+  ASSERT_TRUE(tx->Abort().ok());
   // Verify that reading from an aborted transaction returns an error
-  result = tx.GetNodes(1, 3);
+  result = tx->GetNodes(1, 3);
   ASSERT_FALSE(result.ok());
   ASSERT_EQ(result.status().ToString(), "Invalid: Transaction has been aborted");
 }
@@ -135,22 +135,33 @@ TEST_F(GraphTransactionTest, NoIsolationLevel) {
   // Begin a transaction with NO_ISOLATION
   auto tx_result = tx_graph.BeginTransaction(IsolationLevel::NO_ISOLATION);
   ASSERT_TRUE(tx_result.ok());
-  auto tx = std::move(tx_result).ValueOrDie();
+  auto tx = std::move(tx_result.ValueOrDie());
 
   // Add some nodes
   std::vector<Node> nodes = {Node(1, {"Node1"}, "{\"prop1\": \"value1\"}"),
                              Node(2, {"Node2"}, "{\"prop2\": \"value2\"}")};
 
-  ASSERT_TRUE(tx.AddNodes(nodes).ok());
+  ASSERT_TRUE(tx->AddNodes(nodes).ok());
 
   // Verify nodes were added
-  auto result = tx.GetNodes(1, 3);
+  auto result = tx->GetNodes(1, 3);
   ASSERT_TRUE(result.ok());
   auto retrieved_nodes = result.ValueOrDie();
   ASSERT_EQ(retrieved_nodes.size(), 2);
 
   // Commit should be a no-op with NO_ISOLATION
-  ASSERT_TRUE(tx.Commit().ok());
+  ASSERT_TRUE(tx->Commit().ok());
+}
+
+TEST_F(GraphTransactionTest, PageSizeConsistency) {
+  auto test_path = GetTestDir("page_size_consistency");
+  const size_t expected_page_size = 1000;
+  Graph graph(test_path, PageType::ARROW, expected_page_size);
+  TransactionalGraph tx_graph(graph);
+
+  // Verify that both Graph and TransactionalGraph return the same page size
+  ASSERT_EQ(graph.GetPageSize(), expected_page_size);
+  ASSERT_EQ(tx_graph.GetPageSize(), expected_page_size);
 }
 
 } // namespace

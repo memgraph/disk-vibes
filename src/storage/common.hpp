@@ -17,5 +17,5 @@ void __mg_assert(const char *expr, const char *comment, const char *file, int li
 void init_spdlog() {
   // [time] [thread_id] [log_level] message
   spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%t] [%^%l%$] %v");
-  spdlog::set_level(spdlog::level::info);
+  spdlog::set_level(spdlog::level::trace);
 }

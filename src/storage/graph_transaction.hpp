@@ -31,8 +31,8 @@ class TransactionalGraph {
 public:
   class CommitLog {
   public:
-    explicit CommitLog(const std::filesystem::path &log_dir, size_t batch_size = 1)
-        : log_dir_(log_dir), next_transaction_id_(1), next_entry_id_(1), batch_size_(batch_size) {
+    explicit CommitLog(const std::filesystem::path &log_dir, size_t commit_batch_size = 1)
+        : log_dir_(log_dir), next_transaction_id_(1), next_entry_id_(1), commit_batch_size_(commit_batch_size) {
       std::filesystem::create_directories(log_dir_);
       spdlog::trace("Created commit log directory: {}", log_dir_.string());
     }
@@ -40,7 +40,7 @@ public:
     int64_t BeginTransaction() {
       std::lock_guard<std::mutex> lock(log_mutex_);
       int64_t tx_id = next_transaction_id_++;
-      active_transactions_[tx_id] =
+      transactions_[tx_id] =
           transaction::Transaction{.id = tx_id, .state = transaction::TransactionState::ACTIVE, .entries = {}};
       spdlog::trace("Started transaction {}", tx_id);
       return tx_id;
@@ -48,8 +48,8 @@ public:
 
     ::arrow::Status Append(int64_t tx_id, const transaction::LogEntry &entry) {
       std::lock_guard<std::mutex> lock(log_mutex_);
-      auto it = active_transactions_.find(tx_id);
-      if (it == active_transactions_.end()) {
+      auto it = transactions_.find(tx_id);
+      if (it == transactions_.end()) {
         return ::arrow::Status::Invalid("Transaction not found");
       }
       if (it->second.state != transaction::TransactionState::ACTIVE) {
@@ -66,19 +66,23 @@ public:
 
     ::arrow::Status Commit(int64_t tx_id) {
       std::lock_guard<std::mutex> lock(log_mutex_);
-      auto it = active_transactions_.find(tx_id);
-      if (it == active_transactions_.end()) {
+      auto it = transactions_.find(tx_id);
+      if (it == transactions_.end()) {
         return ::arrow::Status::Invalid("Transaction not found");
       }
       if (it->second.state != transaction::TransactionState::ACTIVE) {
         return ::arrow::Status::Invalid("Transaction is not active");
       }
       it->second.state = transaction::TransactionState::COMMITTED;
-      committed_transactions_[tx_id] = std::move(it->second);
-      active_transactions_.erase(it);
       // TODO(gitbuda): Also add regular write policy, combine data and time policies.
       // Check if we need to write a new batch file
-      if (committed_transactions_.size() >= batch_size_) {
+      size_t committed_count = 0;
+      for (const auto &[id, tx] : transactions_) {
+        if (tx.state == transaction::TransactionState::COMMITTED) {
+          committed_count++;
+        }
+      }
+      if (committed_count >= commit_batch_size_) {
         ARROW_RETURN_NOT_OK(WriteBatchFile());
       }
       return ::arrow::Status::OK();
@@ -87,8 +91,8 @@ public:
     ::arrow::Status Abort(int64_t tx_id) {
       // TODO(gitbuda): Implement ATOMICITY (Abort should revert any changes done by transaction).
       std::lock_guard<std::mutex> lock(log_mutex_);
-      auto it = active_transactions_.find(tx_id);
-      if (it == active_transactions_.end()) {
+      auto it = transactions_.find(tx_id);
+      if (it == transactions_.end()) {
         spdlog::error("Failed to abort transaction {}: Transaction not found", tx_id);
         return ::arrow::Status::Invalid("Transaction not found");
       }
@@ -97,60 +101,45 @@ public:
         return ::arrow::Status::Invalid("Transaction is not active");
       }
       it->second.state = transaction::TransactionState::ABORTED;
-      aborted_transactions_[tx_id] = std::move(it->second);
-      active_transactions_.erase(it);
-      spdlog::trace("Aborted transaction {} with {} entries", tx_id, aborted_transactions_[tx_id].entries.size());
+      spdlog::trace("Aborted transaction {} with {} entries", tx_id, it->second.entries.size());
       return ::arrow::Status::OK();
     }
 
     ::arrow::Result<std::vector<transaction::LogEntry>> GetTransactionEntries(int64_t tx_id) {
       std::lock_guard<std::mutex> lock(log_mutex_);
-      // Check active transactions
-      auto active_it = active_transactions_.find(tx_id);
-      if (active_it != active_transactions_.end()) {
-        spdlog::trace("Retrieved {} entries from active transaction {}", active_it->second.entries.size(), tx_id);
-        return active_it->second.entries;
+      auto it = transactions_.find(tx_id);
+      if (it == transactions_.end()) {
+        spdlog::error("Failed to get entries for transaction {}: Transaction not found", tx_id);
+        return ::arrow::Status::Invalid("Transaction not found");
       }
-      // Check committed transactions
-      auto committed_it = committed_transactions_.find(tx_id);
-      if (committed_it != committed_transactions_.end()) {
-        spdlog::trace("Retrieved {} entries from committed transaction {}", committed_it->second.entries.size(), tx_id);
-        return committed_it->second.entries;
-      }
-      // Check aborted transactions
-      auto aborted_it = aborted_transactions_.find(tx_id);
-      if (aborted_it != aborted_transactions_.end()) {
-        spdlog::trace("Retrieved {} entries from aborted transaction {}", aborted_it->second.entries.size(), tx_id);
-        return aborted_it->second.entries;
-      }
-      spdlog::error("Failed to get entries for transaction {}: Transaction not found", tx_id);
-      return ::arrow::Status::Invalid("Transaction not found");
+      spdlog::trace("Retrieved {} entries from transaction {} (state: {})", it->second.entries.size(), tx_id,
+                    it->second.state == transaction::TransactionState::ACTIVE      ? "ACTIVE"
+                    : it->second.state == transaction::TransactionState::COMMITTED ? "COMMITTED"
+                                                                                   : "ABORTED");
+      return it->second.entries;
     }
 
     ::arrow::Result<transaction::TransactionState> GetTransactionState(int64_t tx_id) {
       std::lock_guard<std::mutex> lock(log_mutex_);
-      if (active_transactions_.contains(tx_id)) {
-        spdlog::trace("Transaction {} is ACTIVE", tx_id);
-        return transaction::TransactionState::ACTIVE;
+      auto it = transactions_.find(tx_id);
+      if (it == transactions_.end()) {
+        spdlog::error("Failed to get state for transaction {}: Transaction not found", tx_id);
+        return ::arrow::Status::Invalid("Transaction not found");
       }
-      if (committed_transactions_.contains(tx_id)) {
-        spdlog::trace("Transaction {} is COMMITTED", tx_id);
-        return transaction::TransactionState::COMMITTED;
-      }
-      if (aborted_transactions_.contains(tx_id)) {
-        spdlog::trace("Transaction {} is ABORTED", tx_id);
-        return transaction::TransactionState::ABORTED;
-      }
-      spdlog::error("Failed to get state for transaction {}: Transaction not found", tx_id);
-      return ::arrow::Status::Invalid("Transaction not found");
+      spdlog::trace("Transaction {} is {}", tx_id,
+                    it->second.state == transaction::TransactionState::ACTIVE      ? "ACTIVE"
+                    : it->second.state == transaction::TransactionState::COMMITTED ? "COMMITTED"
+                                                                                   : "ABORTED");
+      return it->second.state;
     }
 
     std::vector<int64_t> GetActiveTransactionIds() {
       std::lock_guard<std::mutex> lock(log_mutex_);
       std::vector<int64_t> ids;
-      ids.reserve(active_transactions_.size());
-      for (const auto &[id, _] : active_transactions_) {
-        ids.push_back(id);
+      for (const auto &[id, tx] : transactions_) {
+        if (tx.state == transaction::TransactionState::ACTIVE) {
+          ids.push_back(id);
+        }
       }
       return ids;
     }
@@ -160,38 +149,45 @@ public:
     ::arrow::Result<int64_t> GetLastCommittedTransactionId(int64_t visible_from_tx) {
       std::lock_guard<std::mutex> lock(log_mutex_);
       int64_t last_committed = 0;
-      for (const auto &[tx_id, _] : committed_transactions_) {
-        if (tx_id > last_committed) {
-          last_committed = tx_id;
+      for (const auto &[id, tx] : transactions_) {
+        if (tx.state == transaction::TransactionState::COMMITTED && id > last_committed) {
+          last_committed = id;
         }
       }
       return last_committed;
     }
 
-    ::arrow::Status LockPages(int64_t tx_id, const std::unordered_set<int64_t> &page_ids) {
+    ::arrow::Status LockPages(int64_t tx_id, const std::unordered_set<int64_t> &page_ids, bool is_node_pages) {
       std::lock_guard<std::mutex> lock(page_locks_mutex_);
+      auto &active_locks = is_node_pages ? active_node_page_locks_ : active_edge_page_locks_;
+
       for (int64_t page_id : page_ids) {
-        if (IsPageLocked(page_id, tx_id)) {
+        if (IsPageLocked(page_id, tx_id, is_node_pages)) {
           spdlog::trace("Page {} is locked by another transaction", page_id);
           return ::arrow::Status::Invalid("Page ", page_id, " is locked by another transaction");
         }
-        active_page_locks_[tx_id].insert(page_id);
-        spdlog::trace("Transaction {} locked page {}", tx_id, page_id);
+        active_locks[tx_id].insert(page_id);
+        spdlog::trace("Transaction {} locked {} page {}", tx_id, is_node_pages ? "node" : "edge", page_id);
       }
       return ::arrow::Status::OK();
     }
 
     void UnlockPages(int64_t tx_id) {
       std::lock_guard<std::mutex> lock(page_locks_mutex_);
-      if (active_page_locks_.contains(tx_id)) {
-        spdlog::trace("Transaction {} unlocked all pages", tx_id);
-        active_page_locks_.erase(tx_id);
+      if (active_node_page_locks_.contains(tx_id)) {
+        spdlog::trace("Transaction {} unlocked all node pages", tx_id);
+        active_node_page_locks_.erase(tx_id);
+      }
+      if (active_edge_page_locks_.contains(tx_id)) {
+        spdlog::trace("Transaction {} unlocked all edge pages", tx_id);
+        active_edge_page_locks_.erase(tx_id);
       }
     }
 
   private:
-    bool IsPageLocked(int64_t page_id, int64_t current_tx_id) {
-      for (const auto &[tx_id, pages] : active_page_locks_) {
+    bool IsPageLocked(int64_t page_id, int64_t current_tx_id, bool is_node_pages) {
+      const auto &active_locks = is_node_pages ? active_node_page_locks_ : active_edge_page_locks_;
+      for (const auto &[tx_id, pages] : active_locks) {
         if (tx_id != current_tx_id && pages.contains(page_id)) {
           spdlog::trace("Page {} is locked by transaction {}", page_id, tx_id);
           return true;
@@ -201,16 +197,23 @@ public:
     }
 
     ::arrow::Status WriteBatchFile() {
-      if (committed_transactions_.empty()) {
-        return ::arrow::Status::OK();
-      }
-
       // Find the min and max transaction IDs in this batch
       int64_t min_tx_id = std::numeric_limits<int64_t>::max();
       int64_t max_tx_id = std::numeric_limits<int64_t>::min();
-      for (const auto &[tx_id, _] : committed_transactions_) {
-        min_tx_id = std::min(min_tx_id, tx_id);
-        max_tx_id = std::max(max_tx_id, tx_id);
+      std::vector<transaction::Transaction> committed_txs;
+      committed_txs.reserve(commit_batch_size_);
+
+      for (const auto &[tx_id, tx] : transactions_) {
+        if (tx.state == transaction::TransactionState::COMMITTED && !written_transactions_.contains(tx_id)) {
+          min_tx_id = std::min(min_tx_id, tx_id);
+          max_tx_id = std::max(max_tx_id, tx_id);
+          committed_txs.push_back(tx);
+          written_transactions_.insert(tx_id);
+        }
+      }
+
+      if (committed_txs.empty()) {
+        return ::arrow::Status::OK();
       }
 
       // Create a new batch file with transaction ID range
@@ -218,18 +221,8 @@ public:
       filename << "tx_" << min_tx_id << "_" << max_tx_id << ".parquet";
       auto filepath = log_dir_ / filename.str();
 
-      // Convert committed transactions to vector
-      std::vector<transaction::Transaction> transactions;
-      transactions.reserve(committed_transactions_.size());
-      for (const auto &[tx_id, tx] : committed_transactions_) {
-        if (!written_transactions_.contains(tx_id)) {
-          transactions.push_back(tx);
-          written_transactions_.insert(tx_id);
-        }
-      }
-
       // Create table using log schema
-      auto table_result = log_schema::Make(transactions, ::arrow::default_memory_pool());
+      auto table_result = log_schema::Make(committed_txs, ::arrow::default_memory_pool());
       if (!table_result.ok()) {
         return table_result.status();
       }
@@ -249,15 +242,12 @@ public:
     std::mutex log_mutex_;
     std::atomic<int64_t> next_transaction_id_;
     std::atomic<int64_t> next_entry_id_;
-    size_t batch_size_;
-    // TODO(gitbuda): Copies of Transaction is super error prone (even during
-    // construction stuff can go wrong) -> FIXME
-    std::unordered_map<int64_t, transaction::Transaction> active_transactions_;
-    std::unordered_map<int64_t, transaction::Transaction> committed_transactions_;
-    std::unordered_map<int64_t, transaction::Transaction> aborted_transactions_;
+    size_t commit_batch_size_;
+    std::unordered_map<int64_t, transaction::Transaction> transactions_;
     std::unordered_set<int64_t> written_transactions_;
     std::mutex page_locks_mutex_;
-    std::unordered_map<int64_t, std::unordered_set<int64_t>> active_page_locks_;
+    std::unordered_map<int64_t, std::unordered_set<int64_t>> active_node_page_locks_;
+    std::unordered_map<int64_t, std::unordered_set<int64_t>> active_edge_page_locks_;
   };
 
   class Transaction {
@@ -265,6 +255,26 @@ public:
     Transaction(Graph &graph, CommitLog &log, int64_t transaction_id, IsolationLevel isolation)
         : graph_(graph), log_(log), transaction_id_(transaction_id), isolation_(isolation),
           state_(transaction::TransactionState::ACTIVE) {}
+
+    // Delete copy constructor and assignment operator
+    Transaction(const Transaction &) = delete;
+    Transaction &operator=(const Transaction &) = delete;
+
+    // Allow move construction but delete move assignment since we have reference members
+    Transaction(Transaction &&) = default;
+    Transaction &operator=(Transaction &&) = delete;
+
+    ~Transaction() {
+      if (transaction_id_ != 0) {
+        // Only abort if not already committed/aborted
+        if (state_ == transaction::TransactionState::ACTIVE) {
+          auto status = Abort();
+          if (!status.ok()) {
+            spdlog::error("Failed to abort transaction {} in destructor: {}", transaction_id_, status.ToString());
+          }
+        }
+      }
+    }
 
     ::arrow::Status AddNodes(const std::vector<Node> &nodes) {
       if (isolation_ == IsolationLevel::NO_ISOLATION) {
@@ -274,21 +284,21 @@ public:
       // Get page IDs for the nodes
       auto page_ids = graph_.GetPageIdsSetForNodes(nodes);
       // Try to lock the pages
-      auto status = log_.LockPages(transaction_id_, page_ids);
+      auto status = log_.LockPages(transaction_id_, page_ids, true);
       if (!status.ok()) {
-        spdlog::trace("Failed to lock pages for transaction {}: {}", transaction_id_, status.ToString());
+        spdlog::error("Failed to lock pages for transaction {}: {}", transaction_id_, status.ToString());
         return status;
       }
       // Add nodes to the graph
       status = graph_.AddNodes(nodes, transaction_id_);
+      if (!status.ok()) {
+        spdlog::error("Failed to add nodes for transaction {}: {}", transaction_id_, status.ToString());
+        log_.UnlockPages(transaction_id_);
+        return status;
+      }
       // Mark all pages as dirty
       for (const auto &page_id : page_ids) {
         MarkPageAsDirty(page_id);
-      }
-      if (!status.ok()) {
-        spdlog::trace("Failed to add nodes for transaction {}: {}", transaction_id_, status.ToString());
-        log_.UnlockPages(transaction_id_);
-        return status;
       }
       // Add nodes to the log
       transaction::LogEntry entry{
@@ -298,7 +308,7 @@ public:
       };
       status = log_.Append(transaction_id_, entry);
       if (!status.ok()) {
-        spdlog::trace("Failed to append to log for transaction {}: {}", transaction_id_, status.ToString());
+        spdlog::error("Failed to append to log for transaction {}: {}", transaction_id_, status.ToString());
         log_.UnlockPages(transaction_id_);
         return status;
       }
@@ -313,10 +323,11 @@ public:
 
       // Get page IDs for the edges
       auto page_ids = graph_.GetPageIdsSetForEdges(edges);
+
       // Try to lock the pages
-      auto status = log_.LockPages(transaction_id_, page_ids);
+      auto status = log_.LockPages(transaction_id_, page_ids, false);
       if (!status.ok()) {
-        spdlog::trace("Failed to lock pages for transaction {}: {}", transaction_id_, status.ToString());
+        spdlog::error("Failed to lock pages for transaction {}: {}", transaction_id_, status.ToString());
         return status;
       }
 
@@ -328,7 +339,7 @@ public:
       }
 
       if (!status.ok()) {
-        spdlog::trace("Failed to add edges for transaction {}: {}", transaction_id_, status.ToString());
+        spdlog::error("Failed to add edges for transaction {}: {}", transaction_id_, status.ToString());
         log_.UnlockPages(transaction_id_);
         return status;
       }
@@ -341,7 +352,7 @@ public:
       };
       status = log_.Append(transaction_id_, entry);
       if (!status.ok()) {
-        spdlog::trace("Failed to append to log for transaction {}: {}", transaction_id_, status.ToString());
+        spdlog::error("Failed to append to log for transaction {}: {}", transaction_id_, status.ToString());
         log_.UnlockPages(transaction_id_);
         return status;
       }
@@ -514,23 +525,15 @@ public:
   explicit TransactionalGraph(Graph &graph, size_t batch_size = 1)
       : graph_(graph), log_(graph.GetDirectory() / "logs", batch_size) {}
 
-  ~TransactionalGraph() {
-    // Abort any active transactions
-    for (const auto &tx_id : log_.GetActiveTransactionIds()) {
-      auto status = log_.Abort(tx_id);
-      if (!status.ok()) {
-        spdlog::error("Failed to abort transaction during cleanup: {}", status.ToString());
-      }
-    }
+  ::arrow::Result<std::unique_ptr<Transaction>> BeginTransaction(IsolationLevel isolation) {
+    // Get a new transaction ID
+    int64_t tx_id = log_.BeginTransaction();
+
+    // Create new transaction
+    return std::make_unique<Transaction>(graph_, log_, tx_id, isolation);
   }
 
-  ::arrow::Result<Transaction> BeginTransaction(IsolationLevel isolation) {
-    if (isolation == IsolationLevel::NO_ISOLATION) {
-      return Transaction(graph_, log_, 0, isolation);
-    }
-    int64_t transaction_id = log_.BeginTransaction();
-    return Transaction(graph_, log_, transaction_id, isolation);
-  }
+  size_t GetPageSize() const { return graph_.GetPageSize(); }
 
 private:
   Graph &graph_;

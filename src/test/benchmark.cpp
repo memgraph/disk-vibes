@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "spdlog/spdlog.h"
 #include "storage/edge.hpp"
 #include "storage/graph.hpp"
 #include "storage/graph_transaction.hpp"
@@ -119,13 +120,19 @@ BenchmarkResult run_benchmark(Graph &graph, int64_t batch_size, int num_threads,
         if (use_isolation) {
           auto tx_result = tx_graph->BeginTransaction(IsolationLevel::READ_UNCOMMITTED);
           if (!tx_result.ok()) {
-            std::cerr << "Error starting transaction: " << tx_result.status().ToString() << std::endl;
+            spdlog::error("Error beginning transaction: {}", tx_result.status().ToString());
             return;
           }
           auto tx = std::move(tx_result).ValueOrDie();
-          status = tx.AddNodes(nodes);
-          if (status.ok()) {
-            status = tx.Commit();
+          status = tx->AddNodes(nodes);
+          if (!status.ok()) {
+            spdlog::error("Error adding nodes: {}", status.ToString());
+            return;
+          }
+          status = tx->Commit();
+          if (!status.ok()) {
+            spdlog::error("Error committing transaction: {}", status.ToString());
+            return;
           }
         } else {
           status = graph.AddNodes(nodes);
@@ -133,7 +140,7 @@ BenchmarkResult run_benchmark(Graph &graph, int64_t batch_size, int num_threads,
         auto end_time = std::chrono::high_resolution_clock::now();
 
         if (!status.ok()) {
-          std::cerr << "Error adding nodes: " << status.ToString() << std::endl;
+          spdlog::error("Error adding nodes: {}", status.ToString());
           return;
         }
 
@@ -188,13 +195,19 @@ BenchmarkResult run_benchmark(Graph &graph, int64_t batch_size, int num_threads,
         if (use_isolation) {
           auto tx_result = tx_graph->BeginTransaction(IsolationLevel::READ_UNCOMMITTED);
           if (!tx_result.ok()) {
-            std::cerr << "Error starting transaction: " << tx_result.status().ToString() << std::endl;
+            spdlog::error("Error beginning transaction: {}", tx_result.status().ToString());
             return;
           }
           auto tx = std::move(tx_result).ValueOrDie();
-          status = tx.AddEdges(edges);
-          if (status.ok()) {
-            status = tx.Commit();
+          status = tx->AddEdges(edges);
+          if (!status.ok()) {
+            spdlog::error("Error adding edges: {}", status.ToString());
+            return;
+          }
+          status = tx->Commit();
+          if (!status.ok()) {
+            spdlog::error("Error committing transaction: {}", status.ToString());
+            return;
           }
         } else {
           status = graph.AddEdges(edges);
@@ -202,7 +215,7 @@ BenchmarkResult run_benchmark(Graph &graph, int64_t batch_size, int num_threads,
         auto end_time = std::chrono::high_resolution_clock::now();
 
         if (!status.ok()) {
-          std::cerr << "Error adding edges: " << status.ToString() << std::endl;
+          spdlog::error("Error adding edges: {}", status.ToString());
           return;
         }
 
@@ -371,8 +384,7 @@ int main(int argc, char *argv[]) {
         Graph graph(test_dir, page_type, batch_size);
         auto result = run_benchmark(graph, batch_size, num_threads, TOTAL_NODES, TOTAL_EDGES, USE_ISOLATION);
         if (result.import_time < 0) {
-          std::cerr << "Benchmark failed for batch size " << batch_size << " with " << num_threads << " threads"
-                    << std::endl;
+          spdlog::error("Benchmark failed for batch size {} with {} threads", batch_size, num_threads);
           continue;
         }
         results.push_back(result);

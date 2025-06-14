@@ -164,80 +164,88 @@ int main() {
   // Create a transactional graph
   memgraph::TransactionalGraph tx_graph(graph, 2);
 
-  // Begin first transaction
+  spdlog::trace("Graph batch size: {}", graph.GetPageSize());
+  spdlog::trace("Transactional graph batch size: {}", tx_graph.GetPageSize());
+
+  // Start first transaction
   auto tx1_result = tx_graph.BeginTransaction(memgraph::IsolationLevel::READ_UNCOMMITTED);
   if (!tx1_result.ok()) {
-    spdlog::error("Failed to begin transaction 1: {}", tx1_result.status().ToString());
+    spdlog::error("Error beginning transaction: {}", tx1_result.status().ToString());
     return 1;
   }
   auto tx1 = std::move(tx1_result).ValueOrDie();
 
-  // Add nodes in first transaction
-  std::vector<memgraph::Node> tx1_nodes = {memgraph::Node(101, {"Transaction1Node1"}, "{\"prop1\": \"tx1_value1\"}"),
-                                           memgraph::Node(102, {"Transaction1Node2"}, "{\"prop2\": \"tx1_value2\"}")};
-  if (!tx1.AddNodes(tx1_nodes).ok()) {
-    spdlog::error("Failed to add nodes in transaction 1");
-    return 1;
-  }
-
-  // Begin second transaction
+  // Start second transaction
   auto tx2_result = tx_graph.BeginTransaction(memgraph::IsolationLevel::READ_UNCOMMITTED);
   if (!tx2_result.ok()) {
-    spdlog::error("Failed to begin transaction 2: {}", tx2_result.status().ToString());
+    spdlog::error("Error beginning transaction: {}", tx2_result.status().ToString());
     return 1;
   }
   auto tx2 = std::move(tx2_result).ValueOrDie();
 
+  // Add nodes in first transaction
+  std::vector<memgraph::Node> tx1_nodes = {memgraph::Node(1, {"Person"}, "{\"name\": \"Alice\", \"age\": 30}"),
+                                           memgraph::Node(2, {"Person"}, "{\"name\": \"Bob\", \"age\": 25}")};
+  auto status = tx1->AddNodes(tx1_nodes);
+  if (!status.ok()) {
+    spdlog::error("Error adding nodes in transaction {}", tx1->GetTransactionId());
+    return 1;
+  }
+
   // Add nodes in second transaction
-  std::vector<memgraph::Node> tx2_nodes = {memgraph::Node(201, {"Transaction2Node1"}, "{\"prop1\": \"tx2_value1\"}"),
-                                           memgraph::Node(202, {"Transaction2Node2"}, "{\"prop1\": \"tx2_value2\"}"),
-                                           memgraph::Node(203, {"Transaction2Node3"}, "{\"prop1\": \"tx2_value3\"}"),
-                                           memgraph::Node(204, {"Transaction2Node4"}, "{\"prop2\": \"tx2_value4\"}")};
-  if (!tx2.AddNodes(tx2_nodes).ok()) {
-    spdlog::error("Failed to add nodes in transaction 2");
+  std::vector<memgraph::Node> tx2_nodes = {memgraph::Node(101, {"Person"}, "{\"name\": \"Charlie\", \"age\": 35}"),
+                                           memgraph::Node(102, {"Person"}, "{\"name\": \"David\", \"age\": 40}")};
+  status = tx2->AddNodes(tx2_nodes);
+  if (!status.ok()) {
+    spdlog::error("Error adding nodes in transaction {}", tx2->GetTransactionId());
     return 1;
   }
 
   // Add edges in first transaction
-  std::vector<memgraph::Edge> tx1_edges = {memgraph::Edge(301, 101, 102, {"CONNECTS_TX1"}, "{\"weight\": 1.0}")};
-  if (!tx1.AddEdges(tx1_edges).ok()) {
-    spdlog::error("Failed to add edges in transaction 1");
+  std::vector<memgraph::Edge> tx1_edges = {memgraph::Edge(101, 1, 2, "KNOWS", "{\"since\": 2020}", 1000)};
+  status = tx1->AddEdges(tx1_edges);
+  if (!status.ok()) {
+    spdlog::error("Error adding edges in transaction {}", tx1->GetTransactionId());
     return 1;
   }
 
   // Add edges in second transaction
-  std::vector<memgraph::Edge> tx2_edges = {memgraph::Edge(401, 201, 202, {"CONNECTS_TX2"}, "{\"weight\": 2.0}")};
-  if (!tx2.AddEdges(tx2_edges).ok()) {
-    spdlog::error("Failed to add edges in transaction 2");
+  std::vector<memgraph::Edge> tx2_edges = {memgraph::Edge(201, 3, 4, "KNOWS", "{\"since\": 2021}", 1001)};
+  status = tx2->AddEdges(tx2_edges);
+  if (!status.ok()) {
+    spdlog::error("Error adding edges in transaction {}", tx2->GetTransactionId());
     return 1;
   }
 
-  // Verify data from both transactions
-  auto result1 = tx1.GetNodes(0, 1000);
-  if (!result1.ok()) {
-    spdlog::error("Failed to get nodes from transaction 1: {}", result1.status().ToString());
+  // Verify data in first transaction
+  auto nodes_result1 = tx1->GetNodes(0, 1000);
+  if (!nodes_result1.ok()) {
+    spdlog::error("Error getting nodes in transaction {}", tx1->GetTransactionId());
     return 1;
   }
-  auto retrieved_nodes1 = result1.ValueOrDie();
-  spdlog::info("Retrieved {} nodes from transaction 1", retrieved_nodes1.size());
-  PrintNodeDetails(retrieved_nodes1);
+  auto nodes1 = nodes_result1.ValueOrDie();
+  std::cout << "Transaction " << tx1->GetTransactionId() << " nodes: " << nodes1.size() << std::endl;
 
-  auto result2 = tx2.GetNodes(0, 1000);
-  if (!result2.ok()) {
-    spdlog::error("Failed to get nodes from transaction 2: {}", result2.status().ToString());
+  // Verify data in second transaction
+  auto nodes_result2 = tx2->GetNodes(0, 1000);
+  if (!nodes_result2.ok()) {
+    spdlog::error("Error getting nodes in transaction {}", tx2->GetTransactionId());
     return 1;
   }
-  auto retrieved_nodes2 = result2.ValueOrDie();
-  spdlog::info("Retrieved {} nodes from transaction 2", retrieved_nodes2.size());
-  PrintNodeDetails(retrieved_nodes2);
+  auto nodes2 = nodes_result2.ValueOrDie();
+  std::cout << "Transaction " << tx2->GetTransactionId() << " nodes: " << nodes2.size() << std::endl;
 
-  // Commit both transactions
-  if (!tx1.Commit().ok()) {
-    spdlog::error("Failed to commit transaction 1");
+  // Commit first transaction
+  status = tx1->Commit();
+  if (!status.ok()) {
+    spdlog::error("Error committing transaction {}", tx1->GetTransactionId());
     return 1;
   }
-  if (!tx2.Commit().ok()) {
-    spdlog::error("Failed to commit transaction 2");
+
+  // Commit second transaction
+  status = tx2->Commit();
+  if (!status.ok()) {
+    spdlog::error("Error committing transaction {}", tx2->GetTransactionId());
     return 1;
   }
 
