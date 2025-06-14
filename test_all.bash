@@ -12,8 +12,8 @@ NC='\033[0m' # No Color
 echo -e "${BLUE}Building project...${NC}"
 
 # Create and enter build directory
-rm -rf "${SCRIPT_DIR}/build"
 mkdir -p "${SCRIPT_DIR}/build"
+rm -rf "${SCRIPT_DIR}/build/*"
 cd "${SCRIPT_DIR}/build"
 
 # Configure with CMake

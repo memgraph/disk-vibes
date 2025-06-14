@@ -1,18 +1,87 @@
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <map>
 #include <memory>
+#include <set>
 #include <thread>
 
 #include "storage/graph.hpp"
 #include "storage/graph_transaction.hpp"
 #include "storage/isolation_level.hpp"
 
-// isolation level  | G0  |
-// -----------------|-----|
-// no isolation     |  -  |
-// read uncommitted |  +  |
+std::string IsolationLevelToString(memgraph::IsolationLevel level) {
+  switch (level) {
+  case memgraph::IsolationLevel::NO_ISOLATION:
+    return "NO_ISOLATION";
+  case memgraph::IsolationLevel::READ_UNCOMMITTED:
+    return "READ_UNCOMMITTED";
+  case memgraph::IsolationLevel::READ_COMMITTED:
+    return "READ_COMMITTED";
+  default:
+    return "UNKNOWN";
+  }
+}
 
-class HermitageTest : public ::testing::Test {
+// Global test result tracker
+class TestResultTracker {
+public:
+  static TestResultTracker &GetInstance() {
+    static TestResultTracker instance;
+    return instance;
+  }
+
+  void RecordTestResult(const std::string &test_name, memgraph::IsolationLevel level, bool passed) {
+    results_[test_name][level] = passed;
+  }
+
+  void PrintResults() {
+    std::cout << "\nIsolation Level Anomaly Test Results:\n";
+    std::cout << "=====================================\n";
+
+    // Print header
+    std::cout << std::left << std::setw(15) << "Test Case"
+              << "|";
+    std::set<memgraph::IsolationLevel> levels;
+    for (const auto &[test_name, level_results] : results_) {
+      for (const auto &[level, _] : level_results) {
+        levels.insert(level);
+      }
+    }
+    for (const auto &level : levels) {
+      std::cout << std::setw(20) << IsolationLevelToString(level) << "|";
+    }
+    std::cout << "\n";
+
+    // Print separator
+    std::cout << std::string(15, '-') << "+";
+    for (size_t i = 0; i < levels.size(); ++i) {
+      std::cout << std::string(20, '-') << "+";
+    }
+    std::cout << "\n";
+
+    // Print results
+    for (const auto &[test_name, level_results] : results_) {
+      std::cout << std::left << std::setw(15) << test_name << "|";
+      for (const auto &level : levels) {
+        auto it = level_results.find(level);
+        if (it != level_results.end()) {
+          std::cout << std::setw(20) << (it->second ? "PASS" : "FAIL") << "|";
+        } else {
+          std::cout << std::setw(20) << "N/A"
+                    << "|";
+        }
+      }
+      std::cout << "\n";
+    }
+    std::cout << "\n";
+  }
+
+private:
+  TestResultTracker() = default;
+  std::map<std::string, std::map<memgraph::IsolationLevel, bool>> results_;
+};
+
+class HermitageTest : public ::testing::TestWithParam<memgraph::IsolationLevel> {
 protected:
   void SetUp() override {
     // Create temporary directory for test data
@@ -23,12 +92,13 @@ protected:
     // Create base graph
     graph_ = std::make_unique<memgraph::Graph>(test_dir_, memgraph::PageType::ARROW, 1000);
     tx_graph_ = std::make_unique<memgraph::TransactionalGraph>(*graph_);
-    auto tx_result = tx_graph_->BeginTransaction(memgraph::IsolationLevel::READ_UNCOMMITTED);
+    auto tx_result = tx_graph_->BeginTransaction(GetParam());
     if (!tx_result.ok()) {
       spdlog::error("Error beginning transaction: {}", tx_result.status().ToString());
       return;
     }
     auto tx = std::move(tx_result).ValueOrDie();
+    spdlog::info("Initial transaction started with isolation level: {}", IsolationLevelToString(GetParam()));
 
     // Initialize test data
     std::vector<memgraph::Node> initial_nodes = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 11}")};
@@ -53,104 +123,137 @@ protected:
 
 // G0: Write Cycles (dirty writes)
 // Two transactions try to write to the same key
-// TODO(gitbuda): Test
-TEST_F(HermitageTest, G0) {
-  // Start first transaction
-  auto tx1_result = tx_graph_->BeginTransaction(memgraph::IsolationLevel::READ_UNCOMMITTED);
-  ASSERT_TRUE(tx1_result.ok());
-  auto tx1 = std::move(tx1_result).ValueOrDie();
+TEST_P(HermitageTest, G0) {
+  bool test_passed = true;
+  try {
+    // Start first transaction
+    auto tx1_result = tx_graph_->BeginTransaction(GetParam());
+    ASSERT_TRUE(tx1_result.ok());
+    auto tx1 = std::move(tx1_result).ValueOrDie();
+    spdlog::info("Transaction 1 started with isolation level: {}", IsolationLevelToString(GetParam()));
 
-  // Start second transaction
-  auto tx2_result = tx_graph_->BeginTransaction(memgraph::IsolationLevel::READ_UNCOMMITTED);
-  ASSERT_TRUE(tx2_result.ok());
-  auto tx2 = std::move(tx2_result).ValueOrDie();
+    // Start second transaction
+    auto tx2_result = tx_graph_->BeginTransaction(GetParam());
+    ASSERT_TRUE(tx2_result.ok());
+    auto tx2 = std::move(tx2_result).ValueOrDie();
+    spdlog::info("Transaction 2 started with isolation level: {}", IsolationLevelToString(GetParam()));
 
-  // First transaction writes to key 1
-  std::vector<memgraph::Node> nodes1 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 11}")};
-  ASSERT_TRUE(tx1->AddNodes(nodes1).ok());
+    // First transaction writes to key 1
+    std::vector<memgraph::Node> nodes1 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 11}")};
+    ASSERT_TRUE(tx1->AddNodes(nodes1).ok());
 
-  // Second transaction tries to write to key 1 (should fail)
-  std::vector<memgraph::Node> nodes2 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 12}")};
-  // NOTE: If the next line succeeded (staging of changes done) -> there should be an error on commit.
-  ASSERT_FALSE(tx2->AddNodes(nodes2).ok());
-  // TODO(gitbuda): After this happens, the tx2 should automatically be aborted (not yet implemented).
+    // Second transaction tries to write to key 1 (should fail)
+    std::vector<memgraph::Node> nodes2 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 12}")};
+    ASSERT_FALSE(tx2->AddNodes(nodes2).ok());
 
-  // First transaction writes to key 2
-  std::vector<memgraph::Node> nodes3 = {memgraph::Node(2, {"Kv"}, "{\"key\": 2, \"value\": 21}")};
-  ASSERT_TRUE(tx1->AddNodes(nodes3).ok());
+    // First transaction writes to key 2
+    std::vector<memgraph::Node> nodes3 = {memgraph::Node(2, {"Kv"}, "{\"key\": 2, \"value\": 21}")};
+    ASSERT_TRUE(tx1->AddNodes(nodes3).ok());
 
-  // Add edges in first transaction
-  std::vector<memgraph::Edge> edges1 = {memgraph::Edge(1, 1, 2, "CONNECTS", "{\"weight\": 1.0}", 1000)};
-  ASSERT_TRUE(tx1->AddEdges(edges1).ok());
+    // Add edges in first transaction
+    std::vector<memgraph::Edge> edges1 = {memgraph::Edge(1, 1, 2, "CONNECTS", "{\"weight\": 1.0}", 1000)};
+    ASSERT_TRUE(tx1->AddEdges(edges1).ok());
 
-  // Add edges in second transaction
-  std::vector<memgraph::Edge> edges2 = {memgraph::Edge(2, 2, 3, "CONNECTS", "{\"weight\": 2.0}", 1001)};
-  ASSERT_FALSE(tx2->AddEdges(edges2).ok());
+    // Add edges in second transaction
+    std::vector<memgraph::Edge> edges2 = {memgraph::Edge(2, 2, 3, "CONNECTS", "{\"weight\": 2.0}", 1001)};
+    ASSERT_FALSE(tx2->AddEdges(edges2).ok());
 
-  // Commit first transaction
-  ASSERT_TRUE(tx1->Commit().ok());
+    // Commit first transaction
+    ASSERT_TRUE(tx1->Commit().ok());
 
-  // Start another transaction after tx1 and tx2 should see 1:11 and 2:21 (uncommitted one)
-  auto tx12_result = tx_graph_->BeginTransaction(memgraph::IsolationLevel::READ_UNCOMMITTED);
-  ASSERT_TRUE(tx12_result.ok());
-  auto tx12 = std::move(tx12_result).ValueOrDie();
-  auto result12 = tx12->GetNodes(1, 3);
-  ASSERT_TRUE(result12.ok());
-  auto nodes = result12.ValueOrDie();
-  ASSERT_EQ(nodes.size(), 2);
-  ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
-  ASSERT_EQ(nodes[1].props, "{\"key\": 2, \"value\": 21}");
+    // Start another transaction after tx1 and tx2 should see 1:11 and 2:21 (uncommitted one)
+    auto tx12_result = tx_graph_->BeginTransaction(GetParam());
+    ASSERT_TRUE(tx12_result.ok());
+    auto tx12 = std::move(tx12_result).ValueOrDie();
+    spdlog::info("Transaction 12 started with isolation level: {}", IsolationLevelToString(GetParam()));
+    auto result12 = tx12->GetNodes(1, 3);
+    ASSERT_TRUE(result12.ok());
+    auto nodes = result12.ValueOrDie();
+    ASSERT_EQ(nodes.size(), 2);
+    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+    ASSERT_EQ(nodes[1].props, "{\"key\": 2, \"value\": 21}");
 
-  // Second transaction should see the commited value and own uncommitted value
-  auto result2 = tx2->GetNodes(1, 3);
-  ASSERT_TRUE(result2.ok());
-  nodes = result2.ValueOrDie();
-  ASSERT_EQ(nodes.size(), 2);
-  ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
-  ASSERT_EQ(nodes[1].props, "{\"key\": 2, \"value\": 21}");
+    // Second transaction should see the commited value and own uncommitted value
+    auto result2 = tx2->GetNodes(1, 3);
+    ASSERT_TRUE(result2.ok());
+    nodes = result2.ValueOrDie();
+    ASSERT_EQ(nodes.size(), 2);
+    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+    ASSERT_EQ(nodes[1].props, "{\"key\": 2, \"value\": 21}");
 
-  // Second transaction should also be able to commit. NOTE: The success of
-  // commit call might be different depending on
-  // optimistic(staging+failing_later)/pessimistic (early failing).
-  ASSERT_TRUE(tx1->Commit().ok());
-  ASSERT_TRUE(tx12->Commit().ok());
-  ASSERT_TRUE(tx2->Commit().ok());
+    // Second transaction should also be able to commit
+    ASSERT_TRUE(tx1->Commit().ok());
+    ASSERT_TRUE(tx12->Commit().ok());
+    ASSERT_TRUE(tx2->Commit().ok());
+  } catch (const std::exception &e) {
+    test_passed = false;
+  }
+  TestResultTracker::GetInstance().RecordTestResult("G0", GetParam(), test_passed);
 }
 
 // G1a: Dirty Reads
 // One transaction reads a value that was written by another uncommitted transaction
-TEST_F(HermitageTest, G1a) {
-  // Start first transaction
-  auto tx1_result = tx_graph_->BeginTransaction(memgraph::IsolationLevel::READ_UNCOMMITTED);
-  ASSERT_TRUE(tx1_result.ok());
-  auto tx1 = std::move(tx1_result).ValueOrDie();
+TEST_P(HermitageTest, G1a) {
+  bool test_passed = true;
+  try {
+    // Start first transaction
+    auto tx1_result = tx_graph_->BeginTransaction(GetParam());
+    ASSERT_TRUE(tx1_result.ok());
+    auto tx1 = std::move(tx1_result).ValueOrDie();
+    spdlog::info("Transaction 1 started with isolation level: {}", IsolationLevelToString(GetParam()));
 
-  // Start second transaction
-  auto tx2_result = tx_graph_->BeginTransaction(memgraph::IsolationLevel::READ_UNCOMMITTED);
-  ASSERT_TRUE(tx2_result.ok());
-  auto tx2 = std::move(tx2_result).ValueOrDie();
+    // Start second transaction
+    auto tx2_result = tx_graph_->BeginTransaction(GetParam());
+    ASSERT_TRUE(tx2_result.ok());
+    auto tx2 = std::move(tx2_result).ValueOrDie();
+    spdlog::info("Transaction 2 started with isolation level: {}", IsolationLevelToString(GetParam()));
 
-  // First transaction updates key 1
-  std::vector<memgraph::Node> nodes1 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 101}")};
-  ASSERT_TRUE(tx1->AddNodes(nodes1).ok());
+    // First transaction updates key 1
+    std::vector<memgraph::Node> nodes1 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 101}")};
+    ASSERT_TRUE(tx1->AddNodes(nodes1).ok());
 
-  // Second transaction reads key 1 (should see initial value)
-  auto result2 = tx2->GetNodes(1, 2);
-  ASSERT_TRUE(result2.ok());
-  auto nodes = result2.ValueOrDie();
-  ASSERT_EQ(nodes.size(), 1);
-  ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+    // Second transaction reads key 1 (should see initial value)
+    auto result2 = tx2->GetNodes(1, 2);
+    ASSERT_TRUE(result2.ok());
+    auto nodes = result2.ValueOrDie();
+    ASSERT_EQ(nodes.size(), 1);
+    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
 
-  // First transaction aborts
-  ASSERT_TRUE(tx1->Abort().ok());
+    // First transaction aborts
+    ASSERT_TRUE(tx1->Abort().ok());
 
-  // Second transaction reads key 1 again (should still see original value 11)
-  result2 = tx2->GetNodes(1, 2);
-  ASSERT_TRUE(result2.ok());
-  nodes = result2.ValueOrDie();
-  ASSERT_EQ(nodes.size(), 1);
-  ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+    // Second transaction reads key 1 again (should still see original value 11)
+    result2 = tx2->GetNodes(1, 2);
+    ASSERT_TRUE(result2.ok());
+    nodes = result2.ValueOrDie();
+    ASSERT_EQ(nodes.size(), 1);
+    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
 
-  // Second transaction commits
-  ASSERT_TRUE(tx2->Commit().ok());
+    // Second transaction commits
+    ASSERT_TRUE(tx2->Commit().ok());
+  } catch (const std::exception &e) {
+    test_passed = false;
+  }
+  TestResultTracker::GetInstance().RecordTestResult("G1a", GetParam(), test_passed);
+}
+
+INSTANTIATE_TEST_SUITE_P(IsolationLevels, HermitageTest,
+                         ::testing::Values(memgraph::IsolationLevel::READ_UNCOMMITTED,
+                                           memgraph::IsolationLevel::READ_COMMITTED),
+                         [](const ::testing::TestParamInfo<memgraph::IsolationLevel> &info) {
+                           switch (info.param) {
+                           case memgraph::IsolationLevel::READ_UNCOMMITTED:
+                             return "ReadUncommitted";
+                           case memgraph::IsolationLevel::READ_COMMITTED:
+                             return "ReadCommitted";
+                           default:
+                             return "Unknown";
+                           }
+                         });
+
+int main(int argc, char **argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  int result = RUN_ALL_TESTS();
+  TestResultTracker::GetInstance().PrintResults();
+  return result;
 }
