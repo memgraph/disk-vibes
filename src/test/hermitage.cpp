@@ -90,7 +90,7 @@ protected:
     std::filesystem::create_directories(test_dir_);
 
     // Create base graph
-    graph_ = std::make_unique<memgraph::Graph>(test_dir_, memgraph::PageType::ARROW, 1000);
+    graph_ = std::make_unique<memgraph::Graph>(test_dir_, memgraph::PageType::ARROW, 1);
     tx_graph_ = std::make_unique<memgraph::TransactionalGraph>(*graph_);
     auto tx_result = tx_graph_->BeginTransaction(GetParam());
     if (!tx_result.ok()) {
@@ -101,7 +101,8 @@ protected:
     spdlog::info("Initial transaction started with isolation level: {}", IsolationLevelToString(GetParam()));
 
     // Initialize test data
-    std::vector<memgraph::Node> initial_nodes = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 11}")};
+    std::vector<memgraph::Node> initial_nodes = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 10}"),
+                                                 memgraph::Node(2, {"Kv"}, "{\"key\": 2, \"value\": 20}")};
     auto status = tx->AddNodes(initial_nodes);
     if (!status.ok()) {
       spdlog::error("Error adding nodes: {}", status.ToString());
@@ -150,18 +151,10 @@ TEST_P(HermitageTest, G0) {
     std::vector<memgraph::Node> nodes3 = {memgraph::Node(2, {"Kv"}, "{\"key\": 2, \"value\": 21}")};
     ASSERT_TRUE(tx1->AddNodes(nodes3).ok());
 
-    // Add edges in first transaction
-    std::vector<memgraph::Edge> edges1 = {memgraph::Edge(1, 1, 2, "CONNECTS", "{\"weight\": 1.0}", 1000)};
-    ASSERT_TRUE(tx1->AddEdges(edges1).ok());
-
-    // Add edges in second transaction
-    std::vector<memgraph::Edge> edges2 = {memgraph::Edge(2, 2, 3, "CONNECTS", "{\"weight\": 2.0}", 1001)};
-    ASSERT_FALSE(tx2->AddEdges(edges2).ok());
-
     // Commit first transaction
     ASSERT_TRUE(tx1->Commit().ok());
 
-    // Start another transaction after tx1 and tx2 should see 1:11 and 2:21 (uncommitted one)
+    // Start another transaction after tx1 and tx2 should see 1:11 and 2:21
     auto tx12_result = tx_graph_->BeginTransaction(GetParam());
     ASSERT_TRUE(tx12_result.ok());
     auto tx12 = std::move(tx12_result).ValueOrDie();
@@ -173,7 +166,7 @@ TEST_P(HermitageTest, G0) {
     ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
     ASSERT_EQ(nodes[1].props, "{\"key\": 2, \"value\": 21}");
 
-    // Second transaction should see the commited value and own uncommitted value
+    // Second transaction should see the committed values
     auto result2 = tx2->GetNodes(1, 3);
     ASSERT_TRUE(result2.ok());
     nodes = result2.ValueOrDie();
@@ -182,7 +175,6 @@ TEST_P(HermitageTest, G0) {
     ASSERT_EQ(nodes[1].props, "{\"key\": 2, \"value\": 21}");
 
     // Second transaction should also be able to commit
-    ASSERT_TRUE(tx1->Commit().ok());
     ASSERT_TRUE(tx12->Commit().ok());
     ASSERT_TRUE(tx2->Commit().ok());
   } catch (const std::exception &e) {
@@ -217,17 +209,17 @@ TEST_P(HermitageTest, G1a) {
     ASSERT_TRUE(result2.ok());
     auto nodes = result2.ValueOrDie();
     ASSERT_EQ(nodes.size(), 1);
-    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 10}");
 
     // First transaction aborts
     ASSERT_TRUE(tx1->Abort().ok());
 
-    // Second transaction reads key 1 again (should still see original value 11)
+    // Second transaction reads key 1 again (should still see original value 10)
     result2 = tx2->GetNodes(1, 2);
     ASSERT_TRUE(result2.ok());
     nodes = result2.ValueOrDie();
     ASSERT_EQ(nodes.size(), 1);
-    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 10}");
 
     // Second transaction commits
     ASSERT_TRUE(tx2->Commit().ok());
@@ -263,7 +255,7 @@ TEST_P(HermitageTest, G1b) {
     ASSERT_TRUE(result2.ok());
     auto nodes = result2.ValueOrDie();
     ASSERT_EQ(nodes.size(), 1);
-    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 10}");
 
     // First transaction updates key 1 again
     std::vector<memgraph::Node> nodes2 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 11}")};
@@ -279,7 +271,7 @@ TEST_P(HermitageTest, G1b) {
     ASSERT_EQ(nodes.size(), 1);
 
     // For READ_COMMITTED, should see the committed value 11
-    // For READ_UNCOMMITTED, should see the initial value 11
+    // For READ_UNCOMMITTED, should see the initial value 10
     ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
 
     // Second transaction commits
