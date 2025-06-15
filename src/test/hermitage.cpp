@@ -237,6 +237,59 @@ TEST_P(HermitageTest, G1a) {
   TestResultTracker::GetInstance().RecordTestResult("G1a", GetParam(), test_passed);
 }
 
+// G1b: Intermediate Reads (dirty reads)
+// One transaction reads a value that was written by another transaction before it commits
+TEST_P(HermitageTest, G1b) {
+  bool test_passed = true;
+  try {
+    // Start first transaction
+    auto tx1_result = tx_graph_->BeginTransaction(GetParam());
+    ASSERT_TRUE(tx1_result.ok());
+    auto tx1 = std::move(tx1_result).ValueOrDie();
+    spdlog::info("Transaction 1 started with isolation level: {}", IsolationLevelToString(GetParam()));
+
+    // Start second transaction
+    auto tx2_result = tx_graph_->BeginTransaction(GetParam());
+    ASSERT_TRUE(tx2_result.ok());
+    auto tx2 = std::move(tx2_result).ValueOrDie();
+    spdlog::info("Transaction 2 started with isolation level: {}", IsolationLevelToString(GetParam()));
+
+    // First transaction updates key 1
+    std::vector<memgraph::Node> nodes1 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 101}")};
+    ASSERT_TRUE(tx1->AddNodes(nodes1).ok());
+
+    // Second transaction reads key 1 (should see initial value)
+    auto result2 = tx2->GetNodes(1, 2);
+    ASSERT_TRUE(result2.ok());
+    auto nodes = result2.ValueOrDie();
+    ASSERT_EQ(nodes.size(), 1);
+    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+
+    // First transaction updates key 1 again
+    std::vector<memgraph::Node> nodes2 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 11}")};
+    ASSERT_TRUE(tx1->AddNodes(nodes2).ok());
+
+    // First transaction commits
+    ASSERT_TRUE(tx1->Commit().ok());
+
+    // Second transaction reads key 1 again
+    result2 = tx2->GetNodes(1, 2);
+    ASSERT_TRUE(result2.ok());
+    nodes = result2.ValueOrDie();
+    ASSERT_EQ(nodes.size(), 1);
+
+    // For READ_COMMITTED, should see the committed value 11
+    // For READ_UNCOMMITTED, should see the initial value 11
+    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+
+    // Second transaction commits
+    ASSERT_TRUE(tx2->Commit().ok());
+  } catch (const std::exception &e) {
+    test_passed = false;
+  }
+  TestResultTracker::GetInstance().RecordTestResult("G1b", GetParam(), test_passed);
+}
+
 INSTANTIATE_TEST_SUITE_P(IsolationLevels, HermitageTest,
                          ::testing::Values(memgraph::IsolationLevel::READ_UNCOMMITTED,
                                            memgraph::IsolationLevel::READ_COMMITTED),
