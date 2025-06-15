@@ -30,11 +30,29 @@ public:
     return instance;
   }
 
+  TestResultTracker() {
+    // Initialize all test cases with false (FAIL) for all isolation levels
+    std::vector<std::string> test_cases = {"G0", "G1a", "G1b", "G1c", "OTV"};
+    std::vector<memgraph::IsolationLevel> levels = {memgraph::IsolationLevel::READ_UNCOMMITTED,
+                                                    memgraph::IsolationLevel::READ_COMMITTED};
+
+    for (const auto &test_name : test_cases) {
+      for (const auto &level : levels) {
+        results_[test_name][level] = false;
+      }
+    }
+  }
+
   void RecordTestResult(const std::string &test_name, memgraph::IsolationLevel level, bool passed) {
     results_[test_name][level] = passed;
   }
 
   void PrintResults() {
+    // ANSI color codes
+    const char *GREEN = "\033[32m";
+    const char *RED = "\033[31m";
+    const char *RESET = "\033[0m";
+
     std::cout << "\nIsolation Level Anomaly Test Results:\n";
     std::cout << "=====================================\n";
 
@@ -48,7 +66,7 @@ public:
       }
     }
     for (const auto &level : levels) {
-      std::cout << std::setw(20) << IsolationLevelToString(level) << "|";
+      std::cout << std::right << std::setw(20) << IsolationLevelToString(level) << "|";
     }
     std::cout << "\n";
 
@@ -65,10 +83,16 @@ public:
       for (const auto &level : levels) {
         auto it = level_results.find(level);
         if (it != level_results.end()) {
-          std::cout << std::setw(20) << (it->second ? "PASS" : "FAIL") << "|";
+          // Calculate padding to right-align the status in a 20-character cell
+          const int status_length = 4; // Length of "PASS" or "FAIL"
+          const int padding = 20 - status_length;
+
+          std::cout << std::string(padding, ' ')
+                    << (it->second ? std::string(GREEN) + "PASS" + RESET : std::string(RED) + "FAIL" + RESET) << "|";
         } else {
-          std::cout << std::setw(20) << "N/A"
-                    << "|";
+          const int status_length = 4;
+          const int padding = 20 - status_length;
+          std::cout << std::string(padding, ' ') << std::string(RED) + "FAIL" + RESET << "|";
         }
       }
       std::cout << "\n";
@@ -77,7 +101,6 @@ public:
   }
 
 private:
-  TestResultTracker() = default;
   std::map<std::string, std::map<memgraph::IsolationLevel, bool>> results_;
 };
 
