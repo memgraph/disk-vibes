@@ -13,7 +13,7 @@ echo -e "${BLUE}Building project...${NC}"
 
 # Create and enter build directory
 mkdir -p "${SCRIPT_DIR}/build"
-rm -rf "${SCRIPT_DIR}/build/*"
+rm -rf ${SCRIPT_DIR}/build/*
 cd "${SCRIPT_DIR}/build"
 
 # Configure with CMake
@@ -57,7 +57,6 @@ fi
 echo -e "${BLUE}Plotting benchmark results...${NC}"
 cd "${SCRIPT_DIR}"
 python3 plot_benchmark.py
-python3 plot_benchmark_results.py
 
 # Deactivate virtual environment
 deactivate
