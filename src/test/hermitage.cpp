@@ -330,6 +330,66 @@ TEST_P(HermitageTest, G1c) {
   TestResultTracker::GetInstance().RecordTestResult("G1c", GetParam(), test_passed);
 }
 
+// OTV: Observed Transaction Vanishes
+// A transaction that observes another transaction's writes can still commit even if the observed transaction aborts
+TEST_P(HermitageTest, OTV) {
+  bool test_passed = true;
+  try {
+    // Start first transaction
+    auto tx1_result = tx_graph_->BeginTransaction(GetParam());
+    ASSERT_TRUE(tx1_result.ok());
+    auto tx1 = std::move(tx1_result).ValueOrDie();
+    spdlog::info("Transaction 1 started with isolation level: {}", IsolationLevelToString(GetParam()));
+
+    // Start second transaction
+    auto tx2_result = tx_graph_->BeginTransaction(GetParam());
+    ASSERT_TRUE(tx2_result.ok());
+    auto tx2 = std::move(tx2_result).ValueOrDie();
+    spdlog::info("Transaction 2 started with isolation level: {}", IsolationLevelToString(GetParam()));
+
+    // Start third transaction
+    auto tx3_result = tx_graph_->BeginTransaction(GetParam());
+    ASSERT_TRUE(tx3_result.ok());
+    auto tx3 = std::move(tx3_result).ValueOrDie();
+    spdlog::info("Transaction 3 started with isolation level: {}", IsolationLevelToString(GetParam()));
+
+    // First transaction updates key 1 and key 2
+    std::vector<memgraph::Node> nodes1 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 11}")};
+    ASSERT_TRUE(tx1->AddNodes(nodes1).ok());
+    std::vector<memgraph::Node> nodes2 = {memgraph::Node(2, {"Kv"}, "{\"key\": 2, \"value\": 19}")};
+    ASSERT_TRUE(tx1->AddNodes(nodes2).ok());
+
+    // Second transaction tries to update key 1 (should fail)
+    std::vector<memgraph::Node> nodes3 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 12}")};
+    ASSERT_FALSE(tx2->AddNodes(nodes3).ok());
+
+    // First transaction commits
+    ASSERT_TRUE(tx1->Commit().ok());
+
+    // Third transaction reads key 1 and key 2
+    auto result3 = tx3->GetNodes(1, 3);
+    ASSERT_TRUE(result3.ok());
+    auto nodes = result3.ValueOrDie();
+    ASSERT_EQ(nodes.size(), 2);
+    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+    ASSERT_EQ(nodes[1].props, "{\"key\": 2, \"value\": 19}");
+
+    // Third transaction reads key 1 and key 2 again
+    result3 = tx3->GetNodes(1, 3);
+    ASSERT_TRUE(result3.ok());
+    nodes = result3.ValueOrDie();
+    ASSERT_EQ(nodes.size(), 2);
+    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 11}");
+    ASSERT_EQ(nodes[1].props, "{\"key\": 2, \"value\": 19}");
+
+    // Third transaction commits
+    ASSERT_TRUE(tx3->Commit().ok());
+  } catch (const std::exception &e) {
+    test_passed = false;
+  }
+  TestResultTracker::GetInstance().RecordTestResult("OTV", GetParam(), test_passed);
+}
+
 INSTANTIATE_TEST_SUITE_P(IsolationLevels, HermitageTest,
                          ::testing::Values(memgraph::IsolationLevel::READ_UNCOMMITTED,
                                            memgraph::IsolationLevel::READ_COMMITTED),
