@@ -282,6 +282,54 @@ TEST_P(HermitageTest, G1b) {
   TestResultTracker::GetInstance().RecordTestResult("G1b", GetParam(), test_passed);
 }
 
+// G1c: Circular Information Flow (dirty reads)
+// Two transactions read each other's uncommitted writes
+TEST_P(HermitageTest, G1c) {
+  bool test_passed = true;
+  try {
+    // Start first transaction
+    auto tx1_result = tx_graph_->BeginTransaction(GetParam());
+    ASSERT_TRUE(tx1_result.ok());
+    auto tx1 = std::move(tx1_result).ValueOrDie();
+    spdlog::info("Transaction 1 started with isolation level: {}", IsolationLevelToString(GetParam()));
+
+    // Start second transaction
+    auto tx2_result = tx_graph_->BeginTransaction(GetParam());
+    ASSERT_TRUE(tx2_result.ok());
+    auto tx2 = std::move(tx2_result).ValueOrDie();
+    spdlog::info("Transaction 2 started with isolation level: {}", IsolationLevelToString(GetParam()));
+
+    // First transaction updates key 1
+    std::vector<memgraph::Node> nodes1 = {memgraph::Node(1, {"Kv"}, "{\"key\": 1, \"value\": 11}")};
+    ASSERT_TRUE(tx1->AddNodes(nodes1).ok());
+
+    // Second transaction updates key 2
+    std::vector<memgraph::Node> nodes2 = {memgraph::Node(2, {"Kv"}, "{\"key\": 2, \"value\": 22}")};
+    ASSERT_TRUE(tx2->AddNodes(nodes2).ok());
+
+    // First transaction reads key 2 (should see initial value)
+    auto result1 = tx1->GetNodes(2, 3);
+    ASSERT_TRUE(result1.ok());
+    auto nodes = result1.ValueOrDie();
+    ASSERT_EQ(nodes.size(), 1);
+    ASSERT_EQ(nodes[0].props, "{\"key\": 2, \"value\": 20}");
+
+    // Second transaction reads key 1 (should see initial value)
+    auto result2 = tx2->GetNodes(1, 2);
+    ASSERT_TRUE(result2.ok());
+    nodes = result2.ValueOrDie();
+    ASSERT_EQ(nodes.size(), 1);
+    ASSERT_EQ(nodes[0].props, "{\"key\": 1, \"value\": 10}");
+
+    // Both transactions commit
+    ASSERT_TRUE(tx1->Commit().ok());
+    ASSERT_TRUE(tx2->Commit().ok());
+  } catch (const std::exception &e) {
+    test_passed = false;
+  }
+  TestResultTracker::GetInstance().RecordTestResult("G1c", GetParam(), test_passed);
+}
+
 INSTANTIATE_TEST_SUITE_P(IsolationLevels, HermitageTest,
                          ::testing::Values(memgraph::IsolationLevel::READ_UNCOMMITTED,
                                            memgraph::IsolationLevel::READ_COMMITTED),
