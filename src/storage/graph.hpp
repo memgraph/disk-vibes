@@ -7,6 +7,7 @@
 #include <optional>
 #include <shared_mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -53,6 +54,179 @@ private:
   std::map<std::string, std::unique_ptr<std::shared_mutex>> page_mutexes_;
 };
 
+// Index structure for quick node lookups by label and property value
+class NodeIndex {
+public:
+  // Index structure: label -> property_name -> property_value -> set of node IDs
+  using IndexMap =
+      std::unordered_map<std::string,
+                         std::unordered_map<std::string, std::unordered_map<std::string, std::unordered_set<int64_t>>>>;
+
+  // Configuration for which labels and properties to index
+  struct IndexConfig {
+    std::string label;
+    std::string property_name;
+
+    IndexConfig(const std::string &l, const std::string &p) : label(l), property_name(p) {}
+
+    bool operator==(const IndexConfig &other) const {
+      return label == other.label && property_name == other.property_name;
+    }
+  };
+
+  // Constructor with optional index configurations
+  NodeIndex() = default;
+
+  explicit NodeIndex(const std::vector<IndexConfig> &configs) : index_configs_(configs) {
+    // Create empty index entries for each configured label/property combination
+    for (const auto &config : index_configs_) {
+      index_[config.label][config.property_name];
+    }
+  }
+
+  void AddNode(const Node &node) {
+    if (index_configs_.empty()) {
+      return; // Skip indexing if no configurations
+    }
+
+    std::lock_guard<std::shared_mutex> lock(index_mutex_);
+
+    // Only index if the node has labels that match our configurations
+    for (const auto &label : node.labels) {
+      for (const auto &config : index_configs_) {
+        if (config.label == label) {
+          // For now, we'll index by the entire props string
+          // In a more sophisticated implementation, you'd parse the JSON and extract specific properties
+          index_[label][config.property_name][node.props].insert(node.id);
+        }
+      }
+    }
+  }
+
+  void RemoveNode(const Node &node) {
+    if (index_configs_.empty()) {
+      return; // Skip indexing if no configurations
+    }
+
+    std::lock_guard<std::shared_mutex> lock(index_mutex_);
+
+    for (const auto &label : node.labels) {
+      for (const auto &config : index_configs_) {
+        if (config.label == label) {
+          auto label_it = index_.find(label);
+          if (label_it != index_.end()) {
+            auto props_it = label_it->second.find(config.property_name);
+            if (props_it != label_it->second.end()) {
+              auto value_it = props_it->second.find(node.props);
+              if (value_it != props_it->second.end()) {
+                value_it->second.erase(node.id);
+                if (value_it->second.empty()) {
+                  props_it->second.erase(value_it);
+                }
+              }
+            }
+            if (label_it->second.empty()) {
+              index_.erase(label_it);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  std::vector<int64_t> FindNodesByLabelAndProperty(const std::string &label, const std::string &property_name,
+                                                   const std::string &property_value) const {
+    if (index_configs_.empty()) {
+      return {}; // Return empty if no indexes configured
+    }
+
+    // Check if this label/property combination is indexed
+    bool is_indexed = false;
+    for (const auto &config : index_configs_) {
+      if (config.label == label && config.property_name == property_name) {
+        is_indexed = true;
+        break;
+      }
+    }
+
+    if (!is_indexed) {
+      return {}; // Return empty if not indexed
+    }
+
+    std::shared_lock<std::shared_mutex> lock(index_mutex_);
+
+    std::vector<int64_t> result;
+
+    auto label_it = index_.find(label);
+    if (label_it != index_.end()) {
+      auto props_it = label_it->second.find(property_name);
+      if (props_it != label_it->second.end()) {
+        auto value_it = props_it->second.find(property_value);
+        if (value_it != props_it->second.end()) {
+          result.insert(result.end(), value_it->second.begin(), value_it->second.end());
+        }
+      }
+    }
+
+    return result;
+  }
+
+  std::vector<int64_t> FindNodesByLabel(const std::string &label) const {
+    if (index_configs_.empty()) {
+      return {}; // Return empty if no indexes configured
+    }
+
+    // Check if this label is indexed
+    bool is_indexed = false;
+    for (const auto &config : index_configs_) {
+      if (config.label == label) {
+        is_indexed = true;
+        break;
+      }
+    }
+
+    if (!is_indexed) {
+      return {}; // Return empty if not indexed
+    }
+
+    std::shared_lock<std::shared_mutex> lock(index_mutex_);
+
+    std::vector<int64_t> result;
+
+    auto label_it = index_.find(label);
+    if (label_it != index_.end()) {
+      for (const auto &[prop_name, prop_values] : label_it->second) {
+        for (const auto &[prop_value, node_ids] : prop_values) {
+          result.insert(result.end(), node_ids.begin(), node_ids.end());
+        }
+      }
+    }
+
+    return result;
+  }
+
+  bool IsIndexed(const std::string &label, const std::string &property_name) const {
+    for (const auto &config : index_configs_) {
+      if (config.label == label && config.property_name == property_name) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool HasAnyIndexes() const { return !index_configs_.empty(); }
+
+  void Clear() {
+    std::lock_guard<std::shared_mutex> lock(index_mutex_);
+    index_.clear();
+  }
+
+private:
+  mutable std::shared_mutex index_mutex_;
+  IndexMap index_;
+  std::vector<IndexConfig> index_configs_;
+};
+
 class Graph {
 public:
   explicit Graph(const std::filesystem::path &data_dir, PageType page_type = PageType::ARROW,
@@ -61,9 +235,65 @@ public:
     std::filesystem::create_directories(data_dir_);
   }
 
+  // Constructor with index configurations
+  Graph(const std::filesystem::path &data_dir, const std::vector<NodeIndex::IndexConfig> &index_configs,
+        PageType page_type = PageType::ARROW, const int64_t batch_size = 100'000)
+      : data_dir_(data_dir), page_type_(page_type), batch_size_(batch_size), node_index_(index_configs) {
+    std::filesystem::create_directories(data_dir_);
+  }
+
   const std::filesystem::path &GetDirectory() const { return data_dir_; }
   PageType GetPageType() const { return page_type_; }
   size_t GetPageSize() const { return batch_size_; }
+
+  // Index-based lookup methods
+  std::vector<int64_t> FindNodesByLabel(const std::string &label) const { return node_index_.FindNodesByLabel(label); }
+
+  std::vector<int64_t> FindNodesByLabelAndProperty(const std::string &label, const std::string &property_name,
+                                                   const std::string &property_value) const {
+    return node_index_.FindNodesByLabelAndProperty(label, property_name, property_value);
+  }
+
+  // Index status methods
+  bool IsIndexed(const std::string &label, const std::string &property_name) const {
+    return node_index_.IsIndexed(label, property_name);
+  }
+
+  bool HasAnyIndexes() const { return node_index_.HasAnyIndexes(); }
+
+  // Get nodes by their IDs (useful after index lookups)
+  ::arrow::Result<std::vector<Node>> GetNodesByIds(const std::vector<int64_t> &node_ids,
+                                                   std::optional<int64_t> tx_id = std::nullopt) {
+    if (node_ids.empty()) {
+      return std::vector<Node>{};
+    }
+
+    // Find the min and max IDs to determine the page range
+    auto min_max = std::minmax_element(node_ids.begin(), node_ids.end());
+    int64_t min_id = *min_max.first;
+    int64_t max_id = *min_max.second;
+
+    // Get all nodes in the range
+    auto all_nodes_result = GetNodes(min_id, max_id + 1, tx_id);
+    if (!all_nodes_result.ok()) {
+      return all_nodes_result.status();
+    }
+
+    auto all_nodes = all_nodes_result.ValueOrDie();
+
+    // Filter to only the requested IDs
+    std::unordered_set<int64_t> requested_ids(node_ids.begin(), node_ids.end());
+    std::vector<Node> result;
+    result.reserve(node_ids.size());
+
+    for (const auto &node : all_nodes) {
+      if (requested_ids.find(node.id) != requested_ids.end()) {
+        result.push_back(node);
+      }
+    }
+
+    return result;
+  }
 
   auto GetPageIdsSetForNodes(const std::vector<Node> &nodes) {
     std::unordered_set<int64_t> page_ids;
@@ -145,6 +375,12 @@ public:
       std::vector<Node> final_nodes = MergeNodes(existing_nodes, new_nodes);
       ARROW_RETURN_NOT_OK(WriteNodes(final_nodes, filepath));
     }
+
+    // Update the index with new nodes
+    for (const auto &node : nodes) {
+      node_index_.AddNode(node);
+    }
+
     return ::arrow::Status::OK();
   }
 
@@ -265,6 +501,22 @@ public:
     // Create a set for O(1) lookup of IDs to delete
     std::unordered_set<int64_t> ids_to_delete(node_ids.begin(), node_ids.end());
     auto page_to_ids = GetPageToIdsMapping(node_ids);
+
+    // First, get the nodes that will be deleted to update the index
+    std::vector<Node> nodes_to_delete;
+    for (const auto &[page_id, ids] : page_to_ids) {
+      auto filepath = GetNodeFilePath(page_id, tx_id);
+      if (!std::filesystem::exists(filepath)) {
+        continue;
+      }
+      auto existing_nodes = ReadExistingNodes(filepath);
+      for (const auto &node : existing_nodes) {
+        if (ids_to_delete.find(node.id) != ids_to_delete.end()) {
+          nodes_to_delete.push_back(node);
+        }
+      }
+    }
+
     // Process each page
     for (const auto &[page_id, ids] : page_to_ids) {
       auto filepath = GetNodeFilePath(page_id, tx_id);
@@ -275,6 +527,12 @@ public:
       auto remaining_nodes = FilterNodesToDelete(existing_nodes, ids_to_delete);
       ARROW_RETURN_NOT_OK(WriteNodes(remaining_nodes, filepath));
     }
+
+    // Update the index by removing deleted nodes
+    for (const auto &node : nodes_to_delete) {
+      node_index_.RemoveNode(node);
+    }
+
     return ::arrow::Status::OK();
   }
 
@@ -437,6 +695,7 @@ private:
   const PageType page_type_;
   const int64_t batch_size_;
   GraphMutexManager mutex_manager_;
+  NodeIndex node_index_;
 };
 
 } // namespace memgraph
