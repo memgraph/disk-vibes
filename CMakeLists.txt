@@ -41,6 +41,20 @@ if(NOT SPDLOG_INCLUDE_DIR OR NOT SPDLOG_LIBRARY)
     message(FATAL_ERROR "spdlog not found. Please install it first.")
 endif()
 
+# Find Folly
+find_path(FOLLY_INCLUDE_DIR folly/ConcurrentSkipList.h /opt/homebrew/include)
+find_library(FOLLY_LIBRARY NAMES folly PATHS /opt/homebrew/lib)
+if(NOT FOLLY_INCLUDE_DIR OR NOT FOLLY_LIBRARY)
+    message(FATAL_ERROR "Folly not found. Please install it first: brew install folly")
+endif()
+
+# Find glog (required by Folly)
+find_path(GLOG_INCLUDE_DIR glog/logging.h /opt/homebrew/include)
+find_library(GLOG_LIBRARY NAMES glog PATHS /opt/homebrew/lib)
+if(NOT GLOG_INCLUDE_DIR OR NOT GLOG_LIBRARY)
+    message(FATAL_ERROR "glog not found. Please install it first: brew install glog")
+endif()
+
 add_executable(example_graph
   src/main_example_graph.cpp
 )
@@ -68,6 +82,8 @@ target_include_directories(example_graph
     ${ROCKSDB_INCLUDE_DIR}
     ${SPDLOG_INCLUDE_DIR}
     ${FMT_INCLUDE_DIR}
+    ${FOLLY_INCLUDE_DIR}
+    ${GLOG_INCLUDE_DIR}
 )
 target_include_directories(test_graph
     PRIVATE
@@ -77,6 +93,8 @@ target_include_directories(test_graph
     ${GTEST_INCLUDE_DIRS}
     ${SPDLOG_INCLUDE_DIR}
     ${FMT_INCLUDE_DIR}
+    ${FOLLY_INCLUDE_DIR}
+    ${GLOG_INCLUDE_DIR}
 )
 target_include_directories(test_transactional_graph
     PRIVATE
@@ -86,6 +104,8 @@ target_include_directories(test_transactional_graph
     ${GTEST_INCLUDE_DIRS}
     ${SPDLOG_INCLUDE_DIR}
     ${FMT_INCLUDE_DIR}
+    ${FOLLY_INCLUDE_DIR}
+    ${GLOG_INCLUDE_DIR}
 )
 target_include_directories(benchmark
     PRIVATE
@@ -94,12 +114,16 @@ target_include_directories(benchmark
     ${ROCKSDB_INCLUDE_DIR}
     ${SPDLOG_INCLUDE_DIR}
     ${FMT_INCLUDE_DIR}
+    ${FOLLY_INCLUDE_DIR}
+    ${GLOG_INCLUDE_DIR}
 )
 target_include_directories(example_rocks
     PRIVATE
     ${ROCKSDB_INCLUDE_DIR}
     ${SPDLOG_INCLUDE_DIR}
     ${FMT_INCLUDE_DIR}
+    ${FOLLY_INCLUDE_DIR}
+    ${GLOG_INCLUDE_DIR}
 )
 
 target_link_libraries(example_graph
@@ -110,6 +134,8 @@ target_link_libraries(example_graph
     ${PARQUET_LIBRARY}
     ${SPDLOG_LIBRARY}
     ${FMT_LIBRARY}
+    ${FOLLY_LIBRARY}
+    ${GLOG_LIBRARY}
 )
 target_link_libraries(test_graph
     PRIVATE
@@ -121,6 +147,8 @@ target_link_libraries(test_graph
     GTest::Main
     ${SPDLOG_LIBRARY}
     ${FMT_LIBRARY}
+    ${FOLLY_LIBRARY}
+    ${GLOG_LIBRARY}
 )
 target_link_libraries(test_transactional_graph
     PRIVATE
@@ -132,6 +160,8 @@ target_link_libraries(test_transactional_graph
     GTest::Main
     ${SPDLOG_LIBRARY}
     ${FMT_LIBRARY}
+    ${FOLLY_LIBRARY}
+    ${GLOG_LIBRARY}
 )
 target_link_libraries(benchmark
     PRIVATE
@@ -141,12 +171,16 @@ target_link_libraries(benchmark
     ${PARQUET_LIBRARY}
     ${SPDLOG_LIBRARY}
     ${FMT_LIBRARY}
+    ${FOLLY_LIBRARY}
+    ${GLOG_LIBRARY}
 )
 target_link_libraries(example_rocks
     PRIVATE
     ${ROCKSDB_LIBRARY}
     ${SPDLOG_LIBRARY}
     ${FMT_LIBRARY}
+    ${FOLLY_LIBRARY}
+    ${GLOG_LIBRARY}
 )
 target_link_libraries(test_hermitage
     PRIVATE
@@ -158,6 +192,8 @@ target_link_libraries(test_hermitage
     GTest::Main
     ${SPDLOG_LIBRARY}
     ${FMT_LIBRARY}
+    ${FOLLY_LIBRARY}
+    ${GLOG_LIBRARY}
 )
 
 # Add compile definitions for Arrow

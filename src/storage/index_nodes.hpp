@@ -1,24 +1,19 @@
 #pragma once
 
-#include <mutex>
-#include <shared_mutex>
+#include <memory>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include <folly/ConcurrentSkipList.h>
 
 #include "node.hpp"
 
 namespace memgraph {
 
-// Index structure for quick node lookups by label and property value
+// Index structure for quick node lookups by label and property value using Folly's ConcurrentSkipList
 class NodeIndex {
 public:
-  // Index structure: label -> property_name -> property_value -> set of node IDs
-  using IndexMap =
-      std::unordered_map<std::string,
-                         std::unordered_map<std::string, std::unordered_map<std::string, std::unordered_set<int64_t>>>>;
-
   // Configuration for which labels and properties to index
   struct IndexConfig {
     std::string label;
@@ -31,14 +26,45 @@ public:
     }
   };
 
+  // Combined key-value structure for the skiplist
+  struct IndexEntry {
+    std::string label;
+    std::string property_name;
+    std::string property_value;
+    std::unordered_set<int64_t> node_ids;
+
+    // Default constructor required by Folly's ConcurrentSkipList
+    IndexEntry() = default;
+
+    IndexEntry(const std::string &l, const std::string &pn, const std::string &pv, int64_t node_id)
+        : label(l), property_name(pn), property_value(pv) {
+      node_ids.insert(node_id);
+    }
+
+    // Comparison operators for skiplist ordering
+    bool operator<(const IndexEntry &other) const {
+      if (label != other.label)
+        return label < other.label;
+      if (property_name != other.property_name)
+        return property_name < other.property_name;
+      return property_value < other.property_value;
+    }
+
+    bool operator==(const IndexEntry &other) const {
+      return label == other.label && property_name == other.property_name && property_value == other.property_value;
+    }
+
+    void AddNodeId(int64_t node_id) { node_ids.insert(node_id); }
+    void RemoveNodeId(int64_t node_id) { node_ids.erase(node_id); }
+    bool IsEmpty() const { return node_ids.empty(); }
+  };
+
   // Constructor with optional index configurations
   NodeIndex() = default;
 
   explicit NodeIndex(const std::vector<IndexConfig> &configs) : index_configs_(configs) {
-    // Create empty index entries for each configured label/property combination
-    for (const auto &config : index_configs_) {
-      index_[config.label][config.property_name];
-    }
+    // Initialize the concurrent skiplist with a reasonable head height
+    skiplist_ = folly::ConcurrentSkipList<IndexEntry>::createInstance(16);
   }
 
   void AddNode(const Node &node) {
@@ -46,15 +72,27 @@ public:
       return; // Skip indexing if no configurations
     }
 
-    std::lock_guard<std::shared_mutex> lock(index_mutex_);
-
     // Only index if the node has labels that match our configurations
     for (const auto &label : node.labels) {
       for (const auto &config : index_configs_) {
         if (config.label == label) {
           // For now, we'll index by the entire props string
           // In a more sophisticated implementation, you'd parse the JSON and extract specific properties
-          index_[label][config.property_name][node.props].insert(node.id);
+
+          // Use accessor for thread-safe operations
+          typename folly::ConcurrentSkipList<IndexEntry>::Accessor accessor(skiplist_);
+
+          // Try to find existing entry
+          IndexEntry search_key(label, config.property_name, node.props, 0);
+          auto it = accessor.find(search_key);
+          if (it != accessor.end()) {
+            // Update existing entry
+            it->AddNodeId(node.id);
+          } else {
+            // Create new entry
+            IndexEntry new_entry(label, config.property_name, node.props, node.id);
+            accessor.insert(new_entry);
+          }
         }
       }
     }
@@ -65,25 +103,19 @@ public:
       return; // Skip indexing if no configurations
     }
 
-    std::lock_guard<std::shared_mutex> lock(index_mutex_);
-
     for (const auto &label : node.labels) {
       for (const auto &config : index_configs_) {
         if (config.label == label) {
-          auto label_it = index_.find(label);
-          if (label_it != index_.end()) {
-            auto props_it = label_it->second.find(config.property_name);
-            if (props_it != label_it->second.end()) {
-              auto value_it = props_it->second.find(node.props);
-              if (value_it != props_it->second.end()) {
-                value_it->second.erase(node.id);
-                if (value_it->second.empty()) {
-                  props_it->second.erase(value_it);
-                }
-              }
-            }
-            if (label_it->second.empty()) {
-              index_.erase(label_it);
+          IndexEntry search_key(label, config.property_name, node.props, 0);
+
+          // Use accessor for thread-safe operations
+          typename folly::ConcurrentSkipList<IndexEntry>::Accessor accessor(skiplist_);
+
+          auto it = accessor.find(search_key);
+          if (it != accessor.end()) {
+            it->RemoveNodeId(node.id);
+            if (it->IsEmpty()) {
+              accessor.erase(search_key);
             }
           }
         }
@@ -110,22 +142,18 @@ public:
       return {}; // Return empty if not indexed
     }
 
-    std::shared_lock<std::shared_mutex> lock(index_mutex_);
+    IndexEntry search_key(label, property_name, property_value, 0);
 
-    std::vector<int64_t> result;
+    // Use accessor for thread-safe operations
+    typename folly::ConcurrentSkipList<IndexEntry>::Accessor accessor(skiplist_);
 
-    auto label_it = index_.find(label);
-    if (label_it != index_.end()) {
-      auto props_it = label_it->second.find(property_name);
-      if (props_it != label_it->second.end()) {
-        auto value_it = props_it->second.find(property_value);
-        if (value_it != props_it->second.end()) {
-          result.insert(result.end(), value_it->second.begin(), value_it->second.end());
-        }
-      }
+    auto it = accessor.find(search_key);
+    if (it != accessor.end()) {
+      std::vector<int64_t> result(it->node_ids.begin(), it->node_ids.end());
+      return result;
     }
 
-    return result;
+    return {};
   }
 
   std::vector<int64_t> FindNodesByLabel(const std::string &label) const {
@@ -146,19 +174,19 @@ public:
       return {}; // Return empty if not indexed
     }
 
-    std::shared_lock<std::shared_mutex> lock(index_mutex_);
+    std::unordered_set<int64_t> result_set;
 
-    std::vector<int64_t> result;
+    // Use accessor for thread-safe operations
+    typename folly::ConcurrentSkipList<IndexEntry>::Accessor accessor(skiplist_);
 
-    auto label_it = index_.find(label);
-    if (label_it != index_.end()) {
-      for (const auto &[prop_name, prop_values] : label_it->second) {
-        for (const auto &[prop_value, node_ids] : prop_values) {
-          result.insert(result.end(), node_ids.begin(), node_ids.end());
-        }
+    // Iterate through all entries for this label
+    for (auto it = accessor.begin(); it != accessor.end(); ++it) {
+      if (it->label == label) {
+        result_set.insert(it->node_ids.begin(), it->node_ids.end());
       }
     }
 
+    std::vector<int64_t> result(result_set.begin(), result_set.end());
     return result;
   }
 
@@ -174,13 +202,12 @@ public:
   bool HasAnyIndexes() const { return !index_configs_.empty(); }
 
   void Clear() {
-    std::lock_guard<std::shared_mutex> lock(index_mutex_);
-    index_.clear();
+    // Create a new skiplist instance to clear all data
+    skiplist_ = folly::ConcurrentSkipList<IndexEntry>::createInstance(16);
   }
 
 private:
-  mutable std::shared_mutex index_mutex_;
-  IndexMap index_;
+  std::shared_ptr<folly::ConcurrentSkipList<IndexEntry>> skiplist_;
   std::vector<IndexConfig> index_configs_;
 };
 
